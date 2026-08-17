@@ -64,6 +64,12 @@ unlinked = [];
 app.resetTemplateState();
 ok('非 bead_share_ 前缀的 shareImagePath 不删除', unlinked.length === 0 && app.globalData.shareImagePath === '');
 
+// 4.5) 防御：含路径遍历 ".." 的 bead_share_ 路径不删除（社区安全审查 #6：纵深防御，避免越权删文件）
+app.globalData.shareImagePath = 'wxfile://usr/bead_share_../../critical_file.png';
+unlinked = [];
+app.resetTemplateState();
+ok('含 ".." 遍历的分享图路径被拦截、不删除', unlinked.length === 0 && app.globalData.shareImagePath === '');
+
 // 5) 空串 shareImagePath 不触发删除
 app.globalData.shareImagePath = '';
 unlinked = [];

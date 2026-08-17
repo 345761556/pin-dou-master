@@ -611,7 +611,14 @@ function removeFileIfExists(filePath) {
  * @returns {number} 实际删除的文件数量
  */
 function gcBeadTempFiles(opts) {
-  const keepSharePath = (opts && opts.keepSharePath) || '';
+  // keepSharePath 契约（防御性收窄，行为不变）：
+  //   - 非空字符串            → 作为白名单，GC 时保留该分享图（不删）
+  //   - null / undefined / '' / 其他类型 → 不保留任何分享图（启动场景，全部清理）
+  // 仅当其为「非空字符串」才进入白名单，避免把 '' / null / undefined 与「保留某路径」语义混淆，
+  // 也防止后人直接把可能为 '' 的 shareImagePath 传入时意图不清（空串与「无保留」在此等价，但显式
+  // 用 null 表达「无保留路径」更可读）。
+  const keepSharePath =
+    (opts && typeof opts.keepSharePath === 'string' && opts.keepSharePath) ? opts.keepSharePath : '';
   let removed = 0;
   try {
     const fs = wx.getFileSystemManager();

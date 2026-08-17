@@ -672,7 +672,7 @@ Page({
       });
 
       // 先记下旧分享图路径，待新图写入成功后再删（先删后写会留下悬空引用）
-      const oldSharePath = (app.globalData.shareImagePath && app.globalData.shareImagePath.indexOf('bead_share_') !== -1) ? app.globalData.shareImagePath : null;
+      const oldSharePath = (app.globalData.shareImagePath && app.globalData.shareImagePath.indexOf('bead_share_') !== -1 && isValidFilePath(app.globalData.shareImagePath)) ? app.globalData.shareImagePath : null;
       let newSharePath = '';
       let stablePath = '';
       try {
@@ -717,9 +717,21 @@ Page({
       wx.hideLoading();
       log.warn('[shareTemplate] failed:', e);
       wx.showToast({ title: '制作分享图失败，请重试', icon: 'none' });
+      // 修复 #7 根因：原先仅弹 toast 而不 re-throw，导致 shareTemplate 永远是 resolve，
+      // 调用方无法经 .catch() 感知失败（如配额不足时文件未写入却误判成功）。
+      // 此处 re-throw，让 Promise 在失败时正确 reject；toast 仍保留作为用户侧提示。
+      throw e;
     } finally {
       this._shareBusy = false;
     }
+  },
+
+  // 按钮点击入口：包裹 shareTemplate，消费其 reject，避免 bindtap 触发未处理的
+  // promise rejection 告警；错误已在 shareTemplate 内以 toast 告知用户。
+  // 注意：若需以编程方式调用并自行处理失败，请直接 await this.shareTemplate().catch(...)，
+  // 不要经由本包裹层（它刻意吞掉异常仅做告警兜底）。
+  onShareTap() {
+    this.shareTemplate().catch(() => {});
   },
 
   // 仅在存在有效分享图时才设置 imageUrl；空串/未生成时移除该字段，

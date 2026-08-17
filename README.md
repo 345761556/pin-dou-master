@@ -36,6 +36,16 @@ privacy.json / sitemap.json / project.config.json   小程序配置
 2. `project.config.json` 中的 `appid` 可替换为你自己的小程序 AppID（公开标识，不影响代码）。
 3. 开通**云开发**环境，首次运行会在 `app.js` 中 `wx.cloud.init` 自动初始化。
 
+## 图标资源
+
+`app.json` 的 tabBar 图标（`images/icons/*.png`，共 6 张）由 `_gen_icons.py` 生成，且**已纳入版本控制**——正常 `git clone` 后即可直接导入运行，无需任何预处理步骤，不会出现图标 404。若你改动了图标源或想重新生成，执行：
+
+```bash
+python _gen_icons.py
+```
+
+（脚本会在 `images/icons/` 不存在时自动创建目录；正常开发无需手动运行。）
+
 ## 运行测试
 
 测试为纯 Node 脚本，无需测试框架 runner，直接运行单个文件即可：

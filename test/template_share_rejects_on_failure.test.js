@@ -1,9 +1,8 @@
-// test/template_share_savefail_orphan.test.js
-// 回归测试：[3] shareTemplate 旧图清理时机不一致
-// Bug：saveFile 失败时 catch 只清空 shareImagePath 指针，未删 oldSharePath 指向的旧分享图，
-//      指针清空后旧文件成为孤儿 → 下次成功路径读空串跳过删除 → 累积 bead_share_*.png。
-// 修复：catch 中清空指针前先 removeFileIfExists(oldSharePath)。
-// 运行：node test/template_share_savefail_orphan.test.js
+// test/template_share_rejects_on_failure.test.js
+// 回归测试：修复 #7 根因——shareTemplate 在 saveFile 失败时曾静默 resolve（外层 catch 不 re-throw），
+//           导致调用方无法经 .catch() 感知失败。本测试锁死新契约：
+//           失败时 shareTemplate 必须 reject，且仍执行孤儿文件清理副作用。
+// 运行：node test/template_share_rejects_on_failure.test.js
 const fs = require('fs');
 const path = require('path');
 const { attachResetTemplateState } = require('./helpers/mockResetTemplateState');
@@ -14,16 +13,6 @@ function ok(name, cond) {
   else { failed++; console.log('FAIL | ' + name); }
 }
 
-// ---- 1) 静态断言：catch 块内通过 app.resetTemplateState 集中清理（含 clearCurrentTemplate:false） ----
-const tplSrc = fs.readFileSync(path.join(__dirname, '..', 'pages', 'template', 'template.js'), 'utf8');
-const shareIdx = tplSrc.indexOf('async shareTemplate()');
-const shareMethod = tplSrc.slice(shareIdx);
-const idxCatch = shareMethod.indexOf('} catch (e) {');
-const afterCatch = shareMethod.slice(idxCatch);
-ok('catch 块调用 app.resetTemplateState 集中清理旧分享图（clearCurrentTemplate:false, clearSource:false）',
-  /app\.resetTemplateState\(\{\s*clearCurrentTemplate:\s*false,\s*clearSource:\s*false/.test(afterCatch));
-
-// ---- 2) 功能驱动：saveFile 失败时 oldSharePath 必须被删除（无孤儿） ----
 function makeTemplate() {
   const template = [];
   for (let y = 0; y < 3; y++) template.push(new Array(3).fill('C01'));
@@ -41,7 +30,7 @@ function runShareSaveFail() {
   const deleted = [];
   const fakeApp = {
     globalData: {
-      shareImagePath: OLD,        // 模拟已有旧分享图
+      shareImagePath: OLD,
       sourceImagePath: '',
       currentTemplate: makeTemplate(),
       beadType: 'square'
@@ -49,7 +38,6 @@ function runShareSaveFail() {
   };
   attachResetTemplateState(fakeApp);
   global.getApp = () => fakeApp;
-  // 基础 wx mock（_generateExportImage 将被覆盖，不依赖 canvas）
   global.wx = {
     showLoading: () => {}, hideLoading: () => {}, showToast: () => {},
     showModal: () => {}, showShareMenu: () => {},
@@ -65,9 +53,8 @@ function runShareSaveFail() {
     setData: (d) => Object.assign(ctx.data, d)
   });
   ctx._templateData = makeTemplate();
-  // 覆盖 _generateExportImage 直接返回临时图，让流程进入 saveFile 段
   ctx._generateExportImage = async () => 'wxfile://tmp/export.png';
-  // 强制 saveFile 失败（fail 回调触发 reject）
+  // 强制 saveFile 失败：fail 回调触发 reject（内层 Promise 已正确 reject，外层 catch 必须再 re-throw）
   global.wx.getFileSystemManager = () => ({
     unlinkSync: (p) => { deleted.push(p); },
     saveFile: ({ tempFilePath, filePath, success, fail }) => { if (fail) fail(new Error('save failed')); }
@@ -77,14 +64,25 @@ function runShareSaveFail() {
 
 (async () => {
   const { ctx, fakeApp, deleted } = runShareSaveFail();
-  // shareTemplate 失败时会 reject（#7 修复后）；此处 try/catch 消费该 rejection，仅关注副作用断言
-  try { await ctx.shareTemplate(); } catch (e) { /* 预期失败路径 reject，副作用已由内部分支处理 */ }
 
+  let rejected = false, rejectedMsg = '';
+  try {
+    await ctx.shareTemplate();
+  } catch (e) {
+    rejected = true;
+    rejectedMsg = (e && e.message) || String(e);
+  }
+
+  // —— 核心契约：失败时必须 reject ——
+  ok('saveFile 失败时 shareTemplate 必须 reject（不再静默 resolve）', rejected);
+  ok('reject 携带错误信息（调用方可据此降级/回滚）', rejected && /失败/.test(rejectedMsg));
+
+  // —— 副作用仍须正确执行（reject 不应破坏清理逻辑）——
   ok('saveFile 失败时旧分享图 oldSharePath 被删除（不遗留孤儿）', deleted.includes(OLD));
+  ok('saveFile 失败时新尝试写入的 stablePath 也一并清理（防 partial-write 孤儿）',
+    deleted.some(p => p.startsWith('wxfile://usr/bead_share_') && p !== OLD));
   ok('saveFile 失败后分享图指针被清空（_validShareImage 回退默认截图）',
     fakeApp.globalData.shareImagePath === '');
-  ok('saveFile 失败时新尝试写入的 stablePath 也一并清理（防 B5 partial-write 孤儿）',
-    deleted.some(p => p.startsWith('wxfile://usr/bead_share_') && p !== OLD));
   ok('saveFile 失败仅清理旧图与新图两处（无额外误删）', deleted.length === 2);
 
   console.log(`\n${passed} passed, ${failed} failed`);

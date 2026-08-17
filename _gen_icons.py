@@ -129,10 +129,9 @@ def draw_profile(draw, size, color):
 
 # ========== 主程序入口 ==========
 if __name__ == '__main__':
-    if not os.path.exists(icons_dir):
-        print(f'ERROR: 目录不存在: {icons_dir}')
-        print('请确保 images/icons/ 文件夹已创建')
-        sys.exit(1)
+    # 目录不存在时自动创建（exist_ok=True 避免已存在时报错），
+    # 新克隆项目 / CI 环境无需手动建目录即可直接运行生成 tabBar 图标
+    os.makedirs(icons_dir, exist_ok=True)
 
     if not os.access(icons_dir, os.W_OK):
         print(f'ERROR: 目录不可写: {icons_dir}')

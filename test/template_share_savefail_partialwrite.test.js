@@ -68,7 +68,7 @@ function runShareSaveFailPartialWrite() {
 
 (async () => {
   const { ctx, fakeApp, deleted, savedPaths } = runShareSaveFailPartialWrite();
-  try { await ctx.shareTemplate(); } catch (e) { /* 外层 try/catch 收敛为 showToast */ }
+  try { await ctx.shareTemplate(); } catch (e) { /* 失败后 reject（#7 修复），此处消费 rejection，仅关注副作用断言 */ }
 
   const newStablePath = savedPaths[0];
   ok('saveFile 被调用且传入新的 stablePath（bead_share_ 前缀）',

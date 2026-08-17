@@ -63,6 +63,13 @@ gcBeadTempFiles({ keepSharePath: '' });
 ok('启动 GC（keepSharePath 空）删除全部 bead_share', unlinkCalls.filter(p => p.indexOf('bead_share') >= 0).length === 2);
 ok('启动 GC 删除全部 bead_export', unlinkCalls.filter(p => p.indexOf('bead_export') >= 0).length === 1);
 
+// ---- 4b. gcBeadTempFiles keepSharePath 为 null → 与 '' 等价，同样全删（契约：null 显式表「无保留」）----
+readdirNames = ['bead_share_x.png', 'bead_share_y.png', 'bead_export_z.png'];
+unlinkCalls = [];
+gcBeadTempFiles({ keepSharePath: null });
+ok('启动 GC（keepSharePath 为 null）删除全部 bead_share', unlinkCalls.filter(p => p.indexOf('bead_share') >= 0).length === 2);
+ok('启动 GC（keepSharePath 为 null）删除全部 bead_export', unlinkCalls.filter(p => p.indexOf('bead_export') >= 0).length === 1);
+
 // ---- 5. readdir 异常不抛错（兜底健壮）----
 global.wx.getFileSystemManager = () => ({ unlinkSync: () => {}, readdirSync: () => { throw new Error('no permission'); } });
 let threw = false;

@@ -59,7 +59,7 @@
       <text class="action-icon">💾</text>
       <text>保存图片</text>
     </view>
-    <view class="action-btn share-btn" bindtap="shareTemplate">
+    <view class="action-btn share-btn" bindtap="onShareTap">
       <text class="action-icon">📤</text>
       <text>分享</text>
     </view>

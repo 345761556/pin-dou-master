@@ -6,9 +6,10 @@
  *      各只被注册一次（监听不叠加，第二次调用直接 return）
  *   2. 重复事件防抖：连续触发两次 onUpdateFailed → 只弹一个弹窗（第二次被 busy 挡掉）；
  *      弹窗关闭后 busy 复位，可再次弹出
- *   3. 失败重试流程：onUpdateFailed → 弹 [重试/取消]，点重试 → showToast 记录 + 计数递减；
- *      连续失败重试至计数耗尽 → 弹"请稍后重试"纯提示弹窗（showCancel:false，无重试按钮）
- *   4. 重试后可再弹：点重试后（busy 复位）再次 onUpdateFailed → 能再弹重试弹窗（直到耗尽）
+ *   3. 失败诚实提示：onUpdateFailed → 弹纯提示弹窗（showCancel:false，确认按钮"我知道了"，
+ *      文案说明检查网络并重新进入），且不调用 showToast（无假"重试"动作）
+ *   4. 失败可再次提示：弹窗关闭（busy 复位）后再次 onUpdateFailed → 能再弹诚实提示弹窗，
+ *      且全程不调用 showToast
  *   5. onUpdateReady 确认 → applyUpdate 被调用；且 busy 期间 onUpdateReady 也被防抖挡掉
  */
 const path = require('path');
@@ -112,56 +113,45 @@ function closeLastModal(confirm) {
   eq('弹窗关闭后 busy 复位可再弹', showModalCalls.length, 2);
 }
 
-// ---- 场景 3：失败重试流程（含计数耗尽） ----
+// ---- 场景 3：失败诚实提示（无假重试动作） ----
 {
   const app = loadApp();
   app.checkUpdate();
   modalAutoClose = false;
 
-  // 第 1 次失败：弹 [重试/取消]
+  // 失败时弹诚实提示弹窗，不提供"重试"按钮、不弹 toast
   fakeManager.handlers.failed();
-  eq('首次失败弹重试弹窗', showModalCalls.length, 1);
-  ok('重试弹窗含确认按钮"重试"', showModalCalls[0].confirmText === '重试');
-  ok('重试弹窗含取消按钮"取消"', showModalCalls[0].cancelText === '取消');
-  closeLastModal(true);  // 点重试
-  eq('点重试后 showToast 记录"已重新检查"', toastCalls.length, 1);
-  eq('toast 标题为"已重新检查"', toastCalls[0] && toastCalls[0].title, '已重新检查');
-  eq('重试后计数递减为 1', app._updateRetryLeft, 1);
+  eq('失败时弹诚实提示弹窗', showModalCalls.length, 1);
+  ok('提示弹窗 showCancel === false', showModalCalls[0].showCancel === false);
+  ok('提示弹窗确认按钮为"我知道了"', showModalCalls[0].confirmText === '我知道了');
+  eq('提示弹窗文案引导检查网络并重新进入',
+    showModalCalls[0].content,
+    '新版本下载失败，请检查网络后退出小程序重新进入以完成更新。');
+  eq('失败提示不调用 showToast（无假重试动作）', toastCalls.length, 0);
 
-  // 第 2 次失败：仍可再弹重试弹窗（场景 4 覆盖点：重试后 busy 复位可再弹）
-  fakeManager.handlers.failed();
-  eq('重试后再失败仍弹重试弹窗', showModalCalls.length, 2);
-  ok('第二次重试弹窗仍有"重试"按钮', showModalCalls[1].confirmText === '重试');
-  closeLastModal(true);  // 点重试
-  eq('第二次重试后 toast 再记录', toastCalls.length, 2);
-  eq('重试后计数递减为 0', app._updateRetryLeft, 0);
-
-  // 第 3 次失败：计数耗尽 → 纯提示弹窗（无重试按钮）
-  fakeManager.handlers.failed();
-  eq('计数耗尽后弹纯提示弹窗', showModalCalls.length, 3);
-  ok('耗尽弹窗 showCancel === false', showModalCalls[2].showCancel === false);
-  eq('耗尽弹窗文案为"请稍后重试"', showModalCalls[2].content, '新版本下载失败，请稍后重试。');
-  ok('耗尽弹窗无重试按钮（confirmText 未定义）', showModalCalls[2].confirmText === undefined);
-  eq('耗尽后不再弹重试弹窗', showModalCalls[2].confirmText === '重试' ? 1 : 0, 0);
+  // 关闭弹窗（确认）→ busy 复位
+  closeLastModal(true);
+  eq('弹窗关闭后 busy 复位', app._updateDialogBusy, false);
 }
 
-// ---- 场景 4：重试后可再弹（独立验证 busy 复位） ----
+// ---- 场景 4：失败可再次提示（冷启动重新触发 onUpdateFailed） ----
 {
   const app = loadApp();
   app.checkUpdate();
   modalAutoClose = false;
 
   fakeManager.handlers.failed();
-  eq('初始失败弹重试弹窗', showModalCalls.length, 1);
-  closeLastModal(true);  // 点重试 → busy 复位
-  eq('重试后 toast 记录', toastCalls.length, 1);
-  eq('重试后计数递减为 1', app._updateRetryLeft, 1);
+  eq('首次失败弹诚实提示弹窗', showModalCalls.length, 1);
+  closeLastModal(true);  // 确认关闭 → busy 复位
 
+  // 模拟冷启动后微信再次触发下载失败 → 应再次弹诚实提示，且仍无 toast
   fakeManager.handlers.failed();
-  eq('重试后再失败能再弹重试弹窗', showModalCalls.length, 2);
-  ok('再弹弹窗仍为重试弹窗', showModalCalls[1].confirmText === '重试');
+  eq('再次失败能再弹诚实提示弹窗', showModalCalls.length, 2);
+  ok('再弹弹窗仍为诚实提示（无重试按钮）', showModalCalls[1].confirmText === '我知道了');
+  eq('全程不调用 showToast', toastCalls.length, 0);
+
   closeLastModal(true);
-  eq('第二次重试后计数递减为 0', app._updateRetryLeft, 0);
+  eq('第二次关闭后 busy 复位', app._updateDialogBusy, false);
 }
 
 // ---- 场景 5：onUpdateReady 确认 → applyUpdate ----

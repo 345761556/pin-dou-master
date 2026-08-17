@@ -262,7 +262,7 @@ const colorLibPath = path.resolve(root, 'utils/colorLibrary.js');
   sPage._templateData = { cols: 2, rows: 2 };
   // 跳过真实 canvas 导出，直接给出临时图路径
   sPage._generateExportImage = async () => 'wxfile://tmp_fake.png';
-  try { await sPage.shareTemplate(); } catch (e) { /* 外层已捕获并 toast */ }
+  try { await sPage.shareTemplate(); } catch (e) { /* 失败后 reject（#7 修复），此处消费 rejection，仅关注副作用断言 */ }
   check('#7 shareTemplate 新图持久化失败 → shareImagePath 清空且旧图不被删（避免悬空引用）', () => {
     assert.strictEqual(sApp.globalData.shareImagePath, '', '持久化失败应清空 shareImagePath（让微信回退默认截图）');
     assert.ok(!sUnlink.includes('wxfile://usr/bead_share_old.png'), '失败分支不得删除旧分享图');

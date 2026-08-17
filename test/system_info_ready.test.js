@@ -142,5 +142,15 @@ app9.onLaunch();
 eq('top=NaN navBarHeight===88（兜底）', app9.globalData.navBarHeight, 88);
 ok('top=NaN navBarHeight 不为负数', app9.globalData.navBarHeight > 0);
 
+// ---- 场景 9：top/height 为 Infinity（极端环境/异常基础库，回应 #15）----
+// Infinity > 0 为 true，旧判断会放过并算出 Infinity 导航栏高度致布局崩溃；
+// 修复后加 isFinite 兜底，应走兜底 88 且为有限正数（非 Infinity）。
+setupWx(true, { top: Infinity, height: Infinity });
+const app10 = loadApp();
+app10.onLaunch();
+eq('top=Infinity navBarHeight===88（兜底）', app10.globalData.navBarHeight, 88);
+ok('top=Infinity navBarHeight 为有限正数（非 Infinity）',
+  Number.isFinite(app10.globalData.navBarHeight) && app10.globalData.navBarHeight > 0);
+
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 process.exit(fail ? 1 : 0);

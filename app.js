@@ -1,6 +1,6 @@
 // app.js - 拼豆大师全局入口
 const { artkalC, hama, perler, photoPearl, neko, colorLibraryMeta } = require('./utils/colorData.js');
-const { registerGlobalErrorHandler, log } = require('./utils/security.js');
+const { registerGlobalErrorHandler, log, isValidFilePath } = require('./utils/security.js');
 const { gcBeadTempFiles, removeFileIfExists, CONSTANTS: UTIL_CONSTANTS } = require('./utils/util.js');
 
 // ==================== 全局常量 ====================
@@ -45,8 +45,10 @@ const CONSTANTS = Object.freeze({
  */
 function deepFreeze(obj, seen) {
   if (obj === null || typeof obj !== 'object') return obj;
-  if (obj instanceof Date) return obj;
-  if (obj instanceof RegExp) return obj;
+  // Date / RegExp：现代引擎中它们的内部状态（时间值/匹配器）本就不可经属性改写，
+  // 但仍补一层 Object.freeze 使契约完整——防止向实例上挂载/改写属性，且无任何副作用
+  // （getFullYear()/setTime() 等方法调用不受影响）。
+  if (obj instanceof Date || obj instanceof RegExp) return Object.freeze(obj);
   // 防御循环引用：避免对象相互引用时无限递归导致栈溢出
   seen = seen || new WeakSet();
   if (seen.has(obj)) return obj;
@@ -139,6 +141,10 @@ App({
     // 防护网最先部署：确保后续任何初始化步骤（_initSystemInfo/_initColorLibraries/
     // _initPreferences/checkUpdate）抛出的未捕获异常都能被捕获上报
     registerGlobalErrorHandler();
+    // 注册隐私协议处理回调（微信 2023.9 新规，必须在 onLaunch 中尽早注册，确保首个隐私受限
+    // API 调用前 handler 已就位）。注意：此处仅注册回调，并不主动取得用户同意——同意动作由
+    // 框架在隐私受限 API（如 chooseMedia/saveImageToPhotosAlbum）被调用时自动触发本 handler。
+    this._initPrivacyHandler();
     // 初始化云开发（内容安全检测通道；未开通时静默跳过，生产环境检测模块默认 fail-closed 拦截，仅 develop 本地未部署云函数时 fail-open）
     this._initCloud();
     // 初始化应用
@@ -148,11 +154,10 @@ App({
     this._initColorLibraries();
     this._initPreferences();
     this.checkUpdate();
-    // 注册隐私协议处理回调（微信 2023.9 新规，必须在 onLaunch 中注册）
-    this._initPrivacyHandler();
     // 启动清理：兜底扫描并删除 USER_DATA_PATH 下累积的拼豆中间产物（bead_export_*/bead_share_*），
     // 防止本地 10MB 配额被长期占用导致后续导出/分享失败
-    gcBeadTempFiles({ keepSharePath: '' });
+    // 启动场景：无活动分享图，全清 bead_share_/bead_export_ 孤儿；用 null 显式表「无保留路径」
+    gcBeadTempFiles({ keepSharePath: null });
   },
 
   /**
@@ -175,7 +180,11 @@ App({
     const opt = options || {};
     if (opt.clearShareFile !== false) {
       const prev = g.shareImagePath;
-      if (prev && typeof prev === 'string' && prev.indexOf('bead_share_') !== -1) {
+      // 删除前双重守卫：
+      //  1) bead_share_ 子串 —— 仅删我们持久化管理的分享图，绝不误删无关文件（BUG-10 清理前提）
+      //  2) isValidFilePath —— 复用安全模块的路径校验，拦截含 ".." 的路径遍历，
+      //     确保只删 wxfile:// / USER_DATA_PATH 沙盒内的文件（纵深防御，回应社区安全审查 #6）
+      if (prev && typeof prev === 'string' && prev.indexOf('bead_share_') !== -1 && isValidFilePath(prev)) {
         removeFileIfExists(prev);
       }
       g.shareImagePath = '';
@@ -226,8 +235,12 @@ App({
         log.info('[cloud] 当前基础库不支持云开发，内容安全检测通道不可用（生产环境将 fail-closed 拦截）');
         return;
       }
-      // 不指定 env：使用默认云环境（仅开通一个环境时无需显式传 envId）
-      wx.cloud.init({ traceUser: true });
+      // 不指定 env：使用默认云环境（仅开通一个环境时无需显式传 envId）。
+      // 注意：刻意不传 traceUser: true。traceUser 会把用户 OpenID 写入云开发日志，属于
+      // "用户身份追踪"；按微信 2023.9 隐私新规，此类追踪应在用户同意《隐私协议》后发生。
+      // 本项目 init 阶段不依赖任何用户身份归属标记（内容安全 secCheck 通道无需按用户归因），
+      // 故关闭 traceUser，避免在用户同意前于云日志中产生可识别用户的追踪记录。
+      wx.cloud.init();
       this.globalData.cloudAvailable = true;
       log.info('[cloud] 云开发初始化成功，内容安全检测通道可用');
     } catch (e) {
@@ -256,9 +269,12 @@ App({
       // menuButton 可能返回空对象 {}，或胶囊被隐藏（自定义组件/插件环境/隐藏胶囊）时返回
       // {top:0,height:0,...} 全零对象；全零对象会使公式算出负数导航栏高度
       // （(0-statusBarHeight)*2+0+statusBarHeight = -statusBarHeight），导致布局错乱。
-      // 故用 top/height > 0 一并校验（同时挡掉 NaN：typeof NaN==='number' 为 true，仅 typeof 判断不够），
-      // 命中兜底时使用 statusBarHeight + NAV_BAR_FALLBACK，防止负导航栏高度
-      const navH = (menuButton && menuButton.top > 0 && menuButton.height > 0)
+      // 故用 top/height > 0 一并校验（同时挡掉 NaN：typeof NaN==='number' 为 true，仅 typeof 判断不够）。
+      // 进一步防御极端环境返回 Infinity（模拟器/异常基础库）：Infinity > 0 为 true 会让公式算出
+      // Infinity 导航栏高度致布局崩溃，故额外用 isFinite 兜底——与 BEAD_SIZE/偏好的 NaN-Infinity
+      // 防御保持同一口径。命中兜底时使用 statusBarHeight + NAV_BAR_FALLBACK，防止负/无穷导航栏高度。
+      const isValidPositive = (n) => typeof n === 'number' && isFinite(n) && n > 0;
+      const navH = (menuButton && isValidPositive(menuButton.top) && isValidPositive(menuButton.height))
         ? (menuButton.top - statusBarHeight) * 2 + menuButton.height + statusBarHeight
         : statusBarHeight + CONSTANTS.LAYOUT.NAV_BAR_FALLBACK;
       this.globalData.navBarHeight = navH;
@@ -308,10 +324,16 @@ App({
     const prefs = getBeadPrefs();
 
     // 范围校验
-    this.globalData.beadSize = Math.max(
+    // 防御性兜底：prefs 来自 getBeadPrefs()，其底层 safeGetStoragePrefs 已对 number 字段做
+    // isFinite 校验，正常路径下 prefs.beadSize 必为有限数；此处再兜一层，防止未来若有人绕过
+    // getBeadPrefs 直接读 storage 写入 NaN/Infinity 时，NaN 经 Math.max/min 传播污染 globalData
+    // 及下游所有 beadSize 消费点。正常输入下 isFinite 恒为 true，行为与原 clamp 完全一致。
+    let beadSize = Math.max(
       CONSTANTS.BEAD_SIZE.MIN,
       Math.min(CONSTANTS.BEAD_SIZE.MAX, prefs.beadSize)
     );
+    if (!isFinite(beadSize)) beadSize = CONSTANTS.BEAD_SIZE.DEFAULT;
+    this.globalData.beadSize = beadSize;
     this.globalData.beadType = [CONSTANTS.BEAD_TYPE.SQUARE, CONSTANTS.BEAD_TYPE.CIRCLE].includes(prefs.beadType)
       ? prefs.beadType : CONSTANTS.BEAD_TYPE.DEFAULT;
 
@@ -346,28 +368,33 @@ App({
   },
 
   // 检查小程序版本更新
-  // 防抖/重试语义说明：
+  // 语义说明：
   //   1. 监听只注册一次。onCheckForUpdate/onUpdateReady/onUpdateFailed 全部平级注册，
   //      与 hasUpdate 无关（事件只在有更新时触发），避免 hasUpdate 多次回调或重复调用
   //      checkUpdate 导致监听叠加注册、一次 ready/failed 触发多个弹窗。
   //   2. 弹窗防抖。_updateDialogBusy 保证同一时刻最多弹一个更新相关弹窗，
   //      弹窗关闭（success/complete）时复位。
-  //   3. 失败重试。微信 UpdateManager 没有提供"重新下载"的公开 API，applyUpdate() 仅在
-  //      onUpdateReady 触发后才有效；因此"重试"的合理语义是：复位防抖标志、递减重试计数
-  //      并给出 toast 反馈，不重新注册监听（避免叠加），等待微信库在网络恢复后自然再次
-  //      触发 onUpdateReady/onUpdateFailed。
+  //   3. 失败处理（onUpdateFailed）。微信 UpdateManager 没有"重新下载 / 重新检查"的公开
+  //      API——官方仅有 applyUpdate / onCheckForUpdate / onUpdateReady / onUpdateFailed
+  //      四个方法，且文档明确"小程序每次启动（含热启动）自动检查更新，不需由开发者主动
+  //      触发"。因此失败时无法由代码主动重试：任何带"重试"按钮的弹窗都是无实质动作的假
+  //      动作。改为诚实告知用户——请检查网络后退出小程序重新进入（冷启动会重新触发自动
+  //      检查与下载）。也因此不再维护重试计数，避免与"重试"语义挂钩（冷启动本身即重新
+  //      执行 onLaunch → checkUpdate，自然重新注册监听）。
   checkUpdate() {
     if (!wx.canIUse('getUpdateManager')) return;
-    // 监听只注册一次：已注册过则直接返回，防止叠加注册
+    // 监听只注册一次：已注册过则直接返回，防止叠加注册（热启动/重复调用时生效；
+    // 冷启动是全新 JS 上下文，_updateListenersInstalled 复位为 undefined，故会重新注册）
     if (this._updateListenersInstalled) return;
     this._updateListenersInstalled = true;
     this._updateDialogBusy = false;
-    this._updateRetryLeft = 2;  // 失败重试次数，每次重试 -1，耗尽后仅提示
 
     const updateManager = wx.getUpdateManager();
-    updateManager.onCheckForUpdate(() => {
-      // 检测结果由库内部驱动 onUpdateReady/onUpdateFailed（监听已平级注册），
-      // 此处无需再注册任何监听
+    updateManager.onCheckForUpdate((res) => {
+      // 仅做可观测性埋点：回调会收到 res.hasUpdate，可用于日志/埋点；
+      // 实际的更新应用由库内部驱动后续的 onUpdateReady / onUpdateFailed（二者已在本函数内平级注册），
+      // 此处不再注册任何额外监听。
+      log.info('[update] 检查更新结果:', res && res.hasUpdate);
     });
     updateManager.onUpdateReady(() => {
       if (this._updateDialogBusy) return;
@@ -384,32 +411,14 @@ App({
     updateManager.onUpdateFailed(() => {
       if (this._updateDialogBusy) return;
       this._updateDialogBusy = true;
-      if (this._updateRetryLeft > 0) {
-        wx.showModal({
-          title: '更新提示',
-          content: '新版本下载失败，是否重试？',
-          confirmText: '重试',
-          cancelText: '取消',
-          success: (modalRes) => {
-            if (modalRes.confirm) {
-              // 重试：复位 busy → 计数-1 → toast；不重新注册监听，
-              // 等待微信库在网络恢复后自然再次触发 onUpdateReady/onUpdateFailed
-              this._updateDialogBusy = false;
-              this._updateRetryLeft -= 1;
-              wx.showToast({ title: '已重新检查', icon: 'none' });
-            }
-          },
-          complete: () => { this._updateDialogBusy = false; }
-        });
-      } else {
-        // 重试次数耗尽：仅提示，不再提供重试按钮
-        wx.showModal({
-          title: '更新提示',
-          content: '新版本下载失败，请稍后重试。',
-          showCancel: false,
-          complete: () => { this._updateDialogBusy = false; }
-        });
-      }
+      // 无主动重试 API：诚实告知用户，引导其检查网络并冷启动小程序完成更新。
+      wx.showModal({
+        title: '更新提示',
+        content: '新版本下载失败，请检查网络后退出小程序重新进入以完成更新。',
+        showCancel: false,
+        confirmText: '我知道了',
+        complete: () => { this._updateDialogBusy = false; }
+      });
     });
   },
 
