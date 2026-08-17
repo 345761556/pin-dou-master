@@ -528,7 +528,9 @@ Page({
           };
 
           // 添加到历史（保留 r/g/b 供切换色卡时重匹配，见 onPaletteChange 的 guard）
-          const history = this.data.pickerHistory;
+          // ⚠️ 反模式修正：不可直接 mutate this.data，须先拷贝再 setData
+          // （否则绕过 diff 机制，极端时序下引发不可预期渲染）
+          const history = (this.data.pickerHistory || []).slice();
           history.unshift({
             originalHex,
             r, g, b,

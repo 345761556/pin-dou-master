@@ -25,7 +25,9 @@
 const cloud = require('wx-server-sdk');
 cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 
-// msgSecCheck media.content(base64) 上限 10MB；原始字节按 7MB 守卫（base64 膨胀 4/3 ≈ 9.3MB < 10MB）
+// 上传原图文件大小守卫：本项目内容安全走 mediaCheckAsync（异步接口，传 media_url 公网地址，
+// 非 msgSecCheck 的 base64 content），媒体文件建议 ≤10MB，此处以 7MB 守卫预留余量。
+// ⚠️ 历史注释曾误写 msgSecCheck/base64（复制粘贴残留，已移除）；本常量当前未被直接引用，仅供容量参考。
 const MAX_BYTES = 7 * 1024 * 1024;
 // 内容安全场景白名单（mediaCheckAsync v2 scene 枚举，与前端 utils/secCheck.js 保持一致；
 // 取值依据微信官方文档：1=资料 2=评论 3=论坛 4=社交日志）：

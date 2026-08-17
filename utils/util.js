@@ -359,6 +359,10 @@ function compressImageIfNeeded(imagePath, maxSide = 800) {
       const newHeight = Math.round(height * ratio);
 
       // 压缩后保存为临时文件
+      // ⚠️ 此处刻意不使用 .in(this)：本函数当前仅被页面（index/profile）调用，
+      // Canvas(#__compress-canvas) 在页面 wxml 内，wx.createSelectorQuery() 默认查页面作用域即可命中。
+      // 若未来被自定义组件复用，须改为 wx.createSelectorQuery().in(this) 并传入组件实例，
+      // 否则查不到节点会走下方「返回原图」有意降级分支（非 bug，仅脆弱性提示，见 Low-4 报告）。
       const query = wx.createSelectorQuery();
       query.select('#__compress-canvas')
         .fields({ node: true, size: true })

@@ -99,6 +99,8 @@ ok('pickColorAtPoint 的 query.exec 回调入口有 _pageAlive 守护',
   /query\.exec\(\(res\)\s*=>\s*\{[\s\S]*?if \(this\._pageAlive === false\) return;/.test(profSrc));
 ok('pickColorAtPoint 的 img.onload 入口有 _pageAlive 守护',
   /imgEl\.onload\s*=\s*\(\)\s*=>\s*\{[\s\S]*?if \(this\._pageAlive === false\) return;/.test(profSrc));
+ok('[Low-3] pickColorAtPoint 不直接 mutate this.data：先用 .slice() 拷贝再 setData',
+  /\(\s*this\.data\.pickerHistory\s*\|\|\s*\[\]\s*\)\.slice\(\)/.test(profSrc));
 
 (async () => {
   // 场景 A：页面已隐藏（onHide 置 _pageAlive=false）→ exec 回调提前 return，不注册 onload、不 setData
@@ -130,6 +132,25 @@ ok('pickColorAtPoint 的 img.onload 入口有 _pageAlive 守护',
     if (typeof imgOnload === 'function') imgOnload();
     ok('场景B：存活页时注册了 img.onload 并触发取色', typeof imgOnload === 'function');
     ok('场景B：存活页时成功 setData pickedColor', ctx.data.pickedColor && ctx.data.pickedColor.originalHex === '#0A141E');
+  }
+
+  // 场景 C：[Low-3] 反模式回归：取色不得原地 mutate this.data.pickerHistory
+  {
+    execCb = null; imgOnload = null;
+    const originalRef = [];                 // 模拟页面 data 中初始的 pickerHistory 数组
+    const ctx = makeCtx({ pickerHistory: originalRef });
+    ctx._pageAlive = true;
+    ctx.pickColorAtPoint(50, 50);
+    execCb([
+      { width: 100, height: 100, left: 0, top: 0 },
+      { node: fakeCanvas }
+    ]);
+    if (typeof imgOnload === 'function') imgOnload();
+    // 修复后：history = originalRef.slice()（新数组）再 unshift + setData，
+    // 故 this.data.pickerHistory 是「新引用」，原数组 originalRef 不应被改动。
+    ok('场景C：this.data.pickerHistory 为拷贝后的新数组（引用已替换）', ctx.data.pickerHistory !== originalRef);
+    ok('场景C：原数组未被原地 mutate（仍为 0 条）', originalRef.length === 0);
+    ok('场景C：新历史首条已写入（长度 1）', ctx.data.pickerHistory.length === 1);
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);

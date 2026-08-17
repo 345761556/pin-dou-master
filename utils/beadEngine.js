@@ -327,7 +327,7 @@ function matchToPalette(r, g, b, palette, alpha = 255) {
 /**
  * 生成拼豆模板（主入口）
  * 算法复杂度：O(cols * rows * paletteSize)，其中 paletteSize 通常为 30-50
- * 对于最大 6000 像素的模板，计算量可接受（~30 万次颜色距离计算）
+ * 对于最大 8000 像素（cols×rows，单一真源见 ALGO.MAX_PIXELS = CONSTANTS.MAX_PIXELS）的模板，计算量可接受（~32 万次颜色距离计算）
  * 使用中位切分法进行颜色量化，采样最多 5000 像素以平衡质量与性能
  * @param {Object} canvas - 离屏 Canvas 节点
  * @param {Object} image - 已加载的 Image 对象
@@ -1107,6 +1107,10 @@ module.exports = {
   calcLegendHeight,
   initPalette,
   matchToPalette,
+
+  // 算法常量（透明判定阈值：generateTemplate/matchToPalette 内部共用单一真源，
+  // 导出供首页预估复用，保证"预估剔除透明"与"真实生成"口径一致）
+  TRANSPARENCY_ALPHA: ALGO.TRANSPARENCY_ALPHA,
 
   // 颜色量化
   medianCutQuantize,

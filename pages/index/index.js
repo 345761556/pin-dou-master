@@ -1,6 +1,8 @@
 // pages/index/index.js - 首页：图片上传与模板制作
 const app = getApp();
 const beadEngine = require('../../utils/beadEngine');
+// 透明判定阈值（alpha < 该值视为透明/空位），与 beadEngine.generateTemplate 共用单一真源
+const { TRANSPARENCY_ALPHA } = beadEngine;
 const colorLib = require('../../utils/colorLibrary');
 const { getBeadSizePresets, formatNumber, formatMm, compressImageIfNeeded, clampTemplateSize, validateImageFile, getTemplateHistory, getImageInfoWithTimeout, CONSTANTS, MAX_HISTORY, MAX_PIXELS, debounce, removeFileIfExists } = require('../../utils/util');
 // 偏好读取 + 拼豆尺寸范围常量（BEAD_SIZE.MIN/MAX 定义在 app.js 的 CONSTANTS 中，
@@ -52,6 +54,7 @@ Page({
   data: {
     imagePath: '',
     imageSize: null,       // { width, height }
+    transparentRatio: 0,   // 图片透明像素占比 [0,1]；0=未统计/无透明，预估按格子总数上界
 
     // 设置参数
     currentSizeLabel: '29mm 标准拼豆',
@@ -275,6 +278,11 @@ Page({
           colMin,
           colMax
         });
+
+        // 一次性统计透明像素占比，使首页预估"总珠数"与实际生成一致（剔除透明空格）
+        const ratio = await this._measureTransparency(processed.tempFilePath);
+        this.setData({ transparentRatio: ratio });
+
         this.updateEstimate();
         } catch (err) {
           // H1 修复：async success 回调内多个 await（validateImageFile / secCheck.checkImageByPath /
@@ -322,13 +330,65 @@ Page({
     cols = clamped.cols;
     rows = clamped.rows;
 
-    const total = cols * rows;
+    // 透明背景图（fillBackgroundWhite=false）实际珠数 = 格子数 × (1 - 透明占比)，
+    // 与 beadEngine.generateTemplate 的 totalBeads 口径一致（透明空格不计入材料）。
+    // 开启"背景填充白色"时透明区映射为白色珠子，仍按格子总数计；transparentRatio=0（未统计）时退回上界。
+    const gridTotal = cols * rows;
+    const total = (!this.data.fillBackgroundWhite && this.data.transparentRatio > 0)
+      ? Math.round(gridTotal * (1 - this.data.transparentRatio))
+      : gridTotal;
     const width = cols * beadSize;
     const height = rows * beadSize;
 
     this.setData({
       'estimateInfo.totalBeads': formatNumber(total),
       'estimateInfo.size': `${formatMm(width)} × ${formatMm(height)}`
+    });
+  },
+
+  // 一次性统计图片透明像素占比（供首页预估剔除透明空格，与实际生成 totalBeads 口径一致）
+  // 透明阈值复用 beadEngine.TRANSPARENCY_ALPHA（128），保证预估/生成两处判定一致。
+  // 返回 [0,1]；任何失败（canvas 不可用/图片加载失败/页面已卸载）一律返回 0，
+  // 使预估退回"格子总数"上界——安全、不崩溃、不影响功能完整。
+  _measureTransparency(imagePath) {
+    return new Promise((resolve) => {
+      if (this._pageAlive === false) { resolve(0); return; }
+      const query = wx.createSelectorQuery();
+      query.select('#offscreen-canvas').fields({ node: true, size: true }).exec((res) => {
+        if (this._pageAlive === false) { resolve(0); return; }
+        if (!res[0] || !res[0].node) { resolve(0); return; }
+        try {
+          const canvas = res[0].node;
+          const ctx = canvas.getContext('2d');
+          const img = canvas.createImage();
+          img.onload = () => {
+            if (this._pageAlive === false) { resolve(0); return; }
+            try {
+              // 透明占比是图像内容属性，与最终网格分辨率近似无关；
+              // 直接按图片自然尺寸绘制统计，无需按 templateCols 重采样。
+              canvas.width = img.width;
+              canvas.height = img.height;
+              ctx.clearRect(0, 0, img.width, img.height);
+              ctx.drawImage(img, 0, 0, img.width, img.height);
+              const { data } = ctx.getImageData(0, 0, img.width, img.height);
+              const total = data.length / 4;
+              let transparent = 0;
+              for (let i = 3; i < data.length; i += 4) {
+                if (data[i] < TRANSPARENCY_ALPHA) transparent++;
+              }
+              resolve(total > 0 ? transparent / total : 0);
+            } catch (e) {
+              log.warn('[_measureTransparency] getImageData 失败，退回上界预估:', e);
+              resolve(0);
+            }
+          };
+          img.onerror = () => { resolve(0); };
+          img.src = imagePath;
+        } catch (e) {
+          log.warn('[_measureTransparency] canvas 初始化失败，退回上界预估:', e);
+          resolve(0);
+        }
+      });
     });
   },
 
@@ -389,6 +449,8 @@ Page({
   onFillBackgroundChange(e) {
     const value = e.detail.value;
     this.setData({ fillBackgroundWhite: value });
+    // 透明语义变化影响预估口径（false=剔除透明空格 / true=透明拼白珠），切换后刷新预估
+    this.updateEstimate();
     try {
       wx.setStorageSync('pref_fillBackgroundWhite', value);
     } catch (err) {
