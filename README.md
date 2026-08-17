@@ -74,4 +74,4 @@ node test/gallery_display_clamp.test.js
 
 ## 许可证
 
-（待补充，请项目所有者确认开源协议）
+本项目采用 **MIT License**。详见 [LICENSE](./LICENSE)。
