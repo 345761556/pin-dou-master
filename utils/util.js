@@ -358,56 +358,77 @@ function compressImageIfNeeded(imagePath, maxSide = 800) {
       const newWidth = Math.round(width * ratio);
       const newHeight = Math.round(height * ratio);
 
-      // 压缩后保存为临时文件
-      // ⚠️ 此处刻意不使用 .in(this)：本函数当前仅被页面（index/profile）调用，
-      // Canvas(#__compress-canvas) 在页面 wxml 内，wx.createSelectorQuery() 默认查页面作用域即可命中。
-      // 若未来被自定义组件复用，须改为 wx.createSelectorQuery().in(this) 并传入组件实例，
-      // 否则查不到节点会走下方「返回原图」有意降级分支（非 bug，仅脆弱性提示，见 Low-4 报告）。
-      const query = wx.createSelectorQuery();
-      query.select('#__compress-canvas')
-        .fields({ node: true, size: true })
-        .exec((res) => {
-          if (!res[0] || !res[0].node) {
-            // Canvas 不可用时，直接返回原始路径（保留 alpha，与未压缩分支一致）。
-            // 注意：wx.compressImage 默认输出 JPG 会丢失 alpha、把透明区压成黑底，
-            // 与「透明=空位」(BUG-6) 语义冲突，故此处不调用它，宁可不做尺寸压缩也不产出黑底。
-            // 此分支 resolve 原始路径是有意设计（非"静默退化"）：调用方会读取真实 width/height
-            // （index 经 readImageSize、profile 直接回退原图路径），且下游 beadEngine.generateTemplate
-            // 有 6000px 硬上限兜底；正常流程中 #__compress-canvas 节点必存在（index.wxml/profile.wxml），
-            // 此分支仅在节点未就绪/被卸载等异常时序触发，属极低概率回退。
-            resolve({ tempFilePath: imagePath, width, height });
-            return;
-          }
-
-          const canvas = res[0].node;
-          canvas.width = newWidth;
-          canvas.height = newHeight;
-          const ctx = canvas.getContext('2d');
-
-          const img = canvas.createImage();
-          img.onload = () => {
-            // 输出 PNG 而非 JPG：JPG 无 alpha 通道，会把透明区域压成黑色底，
-            // 导致透明背景 LOGO/贴纸类图片出现黑块，且与「透明=空位」(BUG-6) 语义冲突；
-            // 保留 alpha 后下游 generateTemplate 才能正确把透明区当作空位。
-            ctx.drawImage(img, 0, 0, newWidth, newHeight);
-            wx.canvasToTempFilePath({
-              canvas,
-              x: 0, y: 0,
-              width: newWidth,
-              height: newHeight,
-              destWidth: newWidth,
-              destHeight: newHeight,
-              fileType: 'png',
-              quality: 0.9,
-              success: (r) => resolve({ tempFilePath: r.tempFilePath, width: newWidth, height: newHeight }),
-              // 情况二：canvas 导出失败，同上，明确 reject 而非静默回退超限原图。
-              fail: () => reject(new Error('image_compress_failed'))
-            });
-          };
-          // 情况二：图片解码失败，同上，明确 reject 而非静默回退超限原图。
-          img.onerror = () => reject(new Error('image_compress_failed'));
-          img.src = imagePath;
+      // ⚡ Medium-6 性能：不透明 JPG/JPEG 走原生 wx.compressImage
+      // 原生压缩在端内以更优路径执行（主线程零 canvas 重绘、零 PNG 编码），远快于下方 canvas 路径；
+      // 且 JPEG 本无 alpha，不存在「透明→黑底」语义冲突，可安全走原生。
+      // 其余格式（含潜在透明的 PNG/WebP 等）一律走 canvas PNG 路径保 alpha。
+      const ext = (imagePath.split('.').pop() || '').toLowerCase();
+      const isOpaqueJpeg = ext === 'jpg' || ext === 'jpeg';
+      if (isOpaqueJpeg && typeof wx.compressImage === 'function') {
+        wx.compressImage({
+          src: imagePath,
+          quality: 80,
+          compressedWidth: newWidth, // 等比缩放至 maxSide 内，与 canvas 路径尺寸口径一致
+          success: (r) => resolve({ tempFilePath: r.tempFilePath, width: newWidth, height: newHeight }),
+          // 原生压缩失败（极端机型/权限）→ 回退 canvas PNG，保 alpha 安全网
+          fail: () => fallbackCanvas()
         });
+        return;
+      }
+      fallbackCanvas();
+
+      // canvas PNG 路径（保 alpha，避免黑底破坏「透明=空位」语义；Medium-6 安全回退）
+      function fallbackCanvas() {
+        // ⚠️ 此处刻意不使用 .in(this)：本函数当前仅被页面（index/profile）调用，
+        // Canvas(#__compress-canvas) 在页面 wxml 内，wx.createSelectorQuery() 默认查页面作用域即可命中。
+        // 若未来被自定义组件复用，须改为 wx.createSelectorQuery().in(this) 并传入组件实例，
+        // 否则查不到节点会走下方「返回原图」有意降级分支（非 bug，仅脆弱性提示，见 Low-4 报告）。
+        const query = wx.createSelectorQuery();
+        query.select('#__compress-canvas')
+          .fields({ node: true, size: true })
+          .exec((res) => {
+            if (!res[0] || !res[0].node) {
+              // Canvas 不可用时，直接返回原始路径（保留 alpha，与未压缩分支一致）。
+              // 注意：wx.compressImage 默认输出 JPG 会丢失 alpha、把透明区压成黑底，
+              // 与「透明=空位」(BUG-6) 语义冲突，故此处不调用它，宁可不做尺寸压缩也不产出黑底。
+              // 此分支 resolve 原始路径是有意设计（非"静默退化"）：调用方会读取真实 width/height
+              // （index 经 readImageSize、profile 直接回退原图路径），且下游 beadEngine.generateTemplate
+              // 有 6000px 硬上限兜底；正常流程中 #__compress-canvas 节点必存在（index.wxml/profile.wxml），
+              // 此分支仅在节点未就绪/被卸载等异常时序触发，属极低概率回退。
+              resolve({ tempFilePath: imagePath, width, height });
+              return;
+            }
+
+            const canvas = res[0].node;
+            canvas.width = newWidth;
+            canvas.height = newHeight;
+            const ctx = canvas.getContext('2d');
+
+            const img = canvas.createImage();
+            img.onload = () => {
+              // 输出 PNG 而非 JPG：JPG 无 alpha 通道，会把透明区域压成黑色底，
+              // 导致透明背景 LOGO/贴纸类图片出现黑块，且与「透明=空位」(BUG-6) 语义冲突；
+              // 保留 alpha 后下游 generateTemplate 才能正确把透明区当作空位。
+              ctx.drawImage(img, 0, 0, newWidth, newHeight);
+              wx.canvasToTempFilePath({
+                canvas,
+                x: 0, y: 0,
+                width: newWidth,
+                height: newHeight,
+                destWidth: newWidth,
+                destHeight: newHeight,
+                fileType: 'png',
+                quality: 0.9,
+                success: (r) => resolve({ tempFilePath: r.tempFilePath, width: newWidth, height: newHeight }),
+                // 情况二：canvas 导出失败，同上，明确 reject 而非静默回退超限原图。
+                fail: () => reject(new Error('image_compress_failed'))
+              });
+            };
+            // 情况二：图片解码失败，同上，明确 reject 而非静默回退超限原图。
+            img.onerror = () => reject(new Error('image_compress_failed'));
+            img.src = imagePath;
+          });
+      }
     }, () => reject(new Error('获取图片信息失败')));
   });
 }

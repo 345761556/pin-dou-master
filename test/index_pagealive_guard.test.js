@@ -117,7 +117,7 @@ ok('onHide 置 this._pageAlive = false（切换 tab 守护）',
 ok('onUnload 置 this._pageAlive = false（页面销毁守护）',
   /onUnload\(\)\s*\{[\s\S]{0,40}?this\._pageAlive\s*=\s*false/.test(jsSrc));
 ok('img.onload 入口判 this._pageAlive === false 并提前返回',
-  /img\.onload\s*=\s*\(\)\s*=>\s*\{[\s\S]{0,600}?if\s*\(this\._pageAlive\s*===\s*false\)\s*\{[\s\S]{0,60}?wx\.hideLoading\(\);[\s\S]{0,40}?return;/.test(jsSrc));
+  /img\.onload\s*=\s*(?:async\s+)?\(\)\s*=>\s*\{[\s\S]{0,600}?if\s*\(this\._pageAlive\s*===\s*false\)\s*\{[\s\S]{0,60}?wx\.hideLoading\(\);[\s\S]{0,40}?return;/.test(jsSrc));
 ok('img.onerror 入口同样判 this._pageAlive === false 并提前返回',
   /img\.onerror\s*=\s*\(\)\s*=>\s*\{[\s\S]{0,120}?if\s*\(this\._pageAlive\s*===\s*false\)\s*\{[\s\S]{0,60}?wx\.hideLoading\(\);[\s\S]{0,40}?return;/.test(jsSrc));
 
@@ -156,9 +156,10 @@ function setupGenerate(alive) {
   pageObj.generateTemplate();
 }
 
+(async () => {
 console.log('\n场景 1：页面存活（_pageAlive=true），img.onload 正常完成生成并跳转:');
 setupGenerate(true);
-imageMock.onload();
+await imageMock.onload();
 ok('调用了 wx.navigateTo（跳转 template 页）', navigateToCount === 1 && redirectToCount === 0);
 ok('跳转 URL 携带 cols/rows/total',
   lastNavigateToUrl && /cols=10/.test(lastNavigateToUrl) && /rows=10/.test(lastNavigateToUrl) && /total=100/.test(lastNavigateToUrl));
@@ -170,7 +171,7 @@ ok('全局遮罩被 hideLoading 清理', hideLoadingCount >= 1);
 console.log('\n场景 2：页面已死（_pageAlive=false，如用户返回上一页/切换 tab），img.onload 应静默退出:');
 setupGenerate(true);
 pageObj._pageAlive = false;   // 模拟图片异步加载期间用户离开（exec 已注册回调，此刻才置死）
-imageMock.onload();
+await imageMock.onload();
 ok('未调用 wx.navigateTo / wx.redirectTo（杜绝误跳转）', navigateToCount === 0 && redirectToCount === 0);
 ok('未调用 saveToHistory（不写历史）', saveToHistoryCalled === 0);
 ok('onload 内未对已死页面 setData（无 generating:false 写回）',
@@ -181,10 +182,11 @@ ok('未弹 toast（对用户无感知、不误导）', showToastCount === 0);
 console.log('\n场景 3：页面已死（_pageAlive=false），img.onerror 同样应静默退出:');
 setupGenerate(true);
 pageObj._pageAlive = false;   // 模拟图片异步加载期间用户离开
-imageMock.onerror();
+await imageMock.onerror();
 ok('onerror 未调用 wx.navigateTo / wx.redirectTo', navigateToCount === 0 && redirectToCount === 0);
 ok('onerror 未对已死页面 setData', setDataDuringOnload.every(o => o.generating !== false));
 ok('onerror 仅 hideLoading 清理遮罩，无 toast', hideLoadingCount === 1 && showToastCount === 0);
 
 console.log('\n结果: ' + pass + ' 通过, ' + fail + ' 失败');
 process.exit(fail === 0 ? 0 : 1);
+})();

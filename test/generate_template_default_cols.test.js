@@ -7,6 +7,7 @@
  *       cols*rows = 默认² < ALGO.MAX_PIXELS(8000)，clampTemplateSize 不触发，
  *       故模板尺寸直接反映默认宽度。默认 50 → 50×50；若仍为 60 → 60×60。
  */
+(async () => {
 const assert = require('assert');
 const beadEngine = require('../utils/beadEngine.js');
 const { CONSTANTS } = require('../utils/util.js');
@@ -41,8 +42,8 @@ const PALETTE = beadEngine.initPalette([
 const mockImage = { width: 50, height: 50 };
 
 let pass = 0, fail = 0;
-function check(name, fn) {
-  try { fn(); console.log('  PASS', name); pass++; }
+async function check(name, fn) {
+  try { await fn(); console.log('  PASS', name); pass++; }
   catch (e) { console.error('  FAIL', name, '->', e.message); fail++; }
 }
 
@@ -52,8 +53,8 @@ check('CONSTANTS.DEFAULT_COLS === 50', () => {
 });
 
 // 省略 maxBeadWidth 时，默认宽度应为 DEFAULT_COLS(50)，而非遗留的 60
-check('省略 maxBeadWidth → 默认 50×50（非 60×60）', () => {
-  const tpl = beadEngine.generateTemplate(
+check('省略 maxBeadWidth → 默认 50×50（非 60×60）', async () => {
+  const tpl = await beadEngine.generateTemplate(
     makeCanvasMock(), mockImage,
     { beadSize: 29, colorCount: 3, palette: PALETTE, useDithering: false }
   );
@@ -65,8 +66,8 @@ check('省略 maxBeadWidth → 默认 50×50（非 60×60）', () => {
 });
 
 // 显式传值仍优先：传 12 → 12×12
-check('显式 maxBeadWidth=12 → 12×12（覆盖默认）', () => {
-  const tpl = beadEngine.generateTemplate(
+check('显式 maxBeadWidth=12 → 12×12（覆盖默认）', async () => {
+  const tpl = await beadEngine.generateTemplate(
     makeCanvasMock(), mockImage,
     { beadSize: 29, maxBeadWidth: 12, colorCount: 3, palette: PALETTE, useDithering: false }
   );
@@ -78,3 +79,4 @@ check('显式 maxBeadWidth=12 → 12×12（覆盖默认）', () => {
 
 console.log('\n' + (fail === 0 ? 'ALL PASS' : 'HAS FAIL') + ' — pass=' + pass + ' fail=' + fail);
 process.exit(fail === 0 ? 0 : 1);
+})();

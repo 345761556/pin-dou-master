@@ -1,3 +1,4 @@
+(async () => {
 const fs = require('fs');
 const path = require('path');
 const beadEngine = require('../utils/beadEngine.js');
@@ -163,7 +164,7 @@ const TCOLS = 2, TROWS = 2;
 const pixelBuf = [ 255,0,0,255,  0,0,0,0,  255,255,255,255,  0,0,0,0 ];
 const mockImage = { width: TCOLS, height: TROWS };
 
-const tplEmpty = beadEngine.generateTemplate(
+const tplEmpty = await beadEngine.generateTemplate(
   makeMockCanvas(pixelBuf), mockImage,
   { beadSize: 29, maxBeadWidth: TCOLS, colorCount: 3, palette: testPalette, useDithering: false }
 );
@@ -176,7 +177,7 @@ assert(emptyIds.indexOf('R01') >= 0 && emptyIds.indexOf('W01') >= 0, '材料清�
 assert(emptyIds.indexOf(null) === -1, '材料清单不含空位');
 assert(tplEmpty.totalBeads === 2, 'totalBeads = 2（仅两个不透明像素）');
 
-const tplFilled = beadEngine.generateTemplate(
+const tplFilled = await beadEngine.generateTemplate(
   makeMockCanvas(pixelBuf), mockImage,
   { beadSize: 29, maxBeadWidth: TCOLS, colorCount: 3, palette: testPalette, useDithering: false, fillBackgroundWhite: true }
 );
@@ -205,3 +206,4 @@ if (failed === 0) {
 // 写文件
 const outPath = path.join(__dirname, 'test_result.txt');
 fs.writeFileSync(outPath, lines.join('\n'), 'utf8');
+})();

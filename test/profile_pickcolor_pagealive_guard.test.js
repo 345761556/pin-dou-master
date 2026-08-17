@@ -47,6 +47,7 @@ Module.prototype.require = function (id) {
 // ---- mock 微信环境 ----
 let execCb = null;          // query.exec 回调
 let imgOnload = null;       // imgEl.onload
+let toastTitles = [];       // 捕获 showToast 文案，用于验证超时看门狗
 const fakeCtx = {
   fillStyle: '', fillRect() {}, drawImage() {},
   getImageData: (x, y, w, h) => ({ data: [10, 20, 30, 255] })
@@ -69,7 +70,7 @@ global.wx = {
     select: () => ({ boundingClientRect: () => ({}), fields: () => ({}) }),
     exec: (cb) => { execCb = cb; }
   }),
-  showToast: () => {}, showModal: () => {},
+  showToast: (o) => { toastTitles.push(o && o.title); }, showModal: () => {},
   getFileSystemManager: () => ({ copyFileSync: () => {}, accessSync: () => {} })
 };
 
@@ -101,6 +102,12 @@ ok('pickColorAtPoint 的 img.onload 入口有 _pageAlive 守护',
   /imgEl\.onload\s*=\s*\(\)\s*=>\s*\{[\s\S]*?if \(this\._pageAlive === false\) return;/.test(profSrc));
 ok('[Low-3] pickColorAtPoint 不直接 mutate this.data：先用 .slice() 拷贝再 setData',
   /\(\s*this\.data\.pickerHistory\s*\|\|\s*\[\]\s*\)\.slice\(\)/.test(profSrc));
+ok('[Medium-Low-1] pickColorAtPoint 带超时看门狗（pickerSettled 守卫 + 1.5s setTimeout 退回提示），与 index._measureTransparency 同源',
+  /let pickerSettled = false;/.test(profSrc) &&
+  /const pickerTimer = setTimeout\(\(\) => \{[\s\S]*?pickerSettled = true;[\s\S]*?取色超时，请重试/.test(profSrc));
+ok('[Medium-Low-1] img.onload / img.onerror 均先置 pickerSettled 并 clearTimeout(pickerTimer)，防超时与真实回调重复触发',
+  /imgEl\.onload\s*=\s*\(\)\s*=>\s*\{[\s\S]*?pickerSettled = true;[\s\S]*?clearTimeout\(pickerTimer\)/.test(profSrc) &&
+  /imgEl\.onerror\s*=\s*\(\)\s*=>\s*\{[\s\S]*?pickerSettled = true;[\s\S]*?clearTimeout\(pickerTimer\)/.test(profSrc));
 
 (async () => {
   // 场景 A：页面已隐藏（onHide 置 _pageAlive=false）→ exec 回调提前 return，不注册 onload、不 setData
@@ -151,6 +158,24 @@ ok('[Low-3] pickColorAtPoint 不直接 mutate this.data：先用 .slice() 拷贝
     ok('场景C：this.data.pickerHistory 为拷贝后的新数组（引用已替换）', ctx.data.pickerHistory !== originalRef);
     ok('场景C：原数组未被原地 mutate（仍为 0 条）', originalRef.length === 0);
     ok('场景C：新历史首条已写入（长度 1）', ctx.data.pickerHistory.length === 1);
+  }
+
+  // 场景 D：[Medium-Low-1] 超时看门狗。页面存活、图片选好，但 onload/onerror 都永不触发
+  // （WeChat 偶发 canvas 节点销毁 / 图片解码卡死）→ 1.5s 超时兜底应弹「取色超时」提示，不永久挂起。
+  {
+    toastTitles = [];
+    execCb = null; imgOnload = null;
+    const ctx = makeCtx();
+    ctx._pageAlive = true;
+    ctx.pickColorAtPoint(50, 50);
+    execCb([
+      { width: 100, height: 100, left: 0, top: 0 },
+      { node: fakeCanvas }
+    ]);
+    // 关键：绝不调用 imgOnload / 不触发 onerror（模拟回调永不触发）
+    ok('场景D：超时前未静默 setData pickedColor（无响应但不崩溃）', ctx.data.pickedColor === undefined);
+    await new Promise((r) => setTimeout(r, 1700));
+    ok('场景D：1.5s 看门狗触发「取色超时」提示（未永久挂起选图链）', toastTitles.indexOf('取色超时，请重试') !== -1);
   }
 
   console.log(`\n${passed} passed, ${failed} failed`);

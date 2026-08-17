@@ -6,6 +6,7 @@
  * 注：尺寸断言位于任何 ctx 调用之前，因此「超大图」用例无需完整 canvas mock；
  *     「合法小图」用例才需要最小化的 canvas/ctx mock 跑通整条链路。
  */
+(async () => {
 const assert = require('assert');
 const beadEngine = require('../utils/beadEngine.js');
 
@@ -45,8 +46,8 @@ function baseOptions(overrides = {}) {
 }
 
 let pass = 0, fail = 0;
-function check(name, fn) {
-  try { fn(); console.log('  PASS', name); pass++; }
+async function check(name, fn) {
+  try { await fn(); console.log('  PASS', name); pass++; }
   catch (e) { console.error('  FAIL', name, '->', e.message); fail++; }
 }
 
@@ -69,12 +70,12 @@ check('高度 7000 抛错', () => {
 });
 
 // C. 边界值 6000 恰好放行
-check('宽度恰好 6000 不抛错', () => {
+check('宽度恰好 6000 不抛错', async () => {
   const img = { width: 6000, height: 100 };
   const canvas = makeCanvasMock();
   let threw = false;
   try {
-    beadEngine.generateTemplate(canvas, img, baseOptions());
+    await beadEngine.generateTemplate(canvas, img, baseOptions());
   } catch (e) {
     threw = true;
     console.error('    意外抛错:', e.message);
@@ -83,10 +84,10 @@ check('宽度恰好 6000 不抛错', () => {
 });
 
 // D. 合法小图正常返回
-check('100x100 正常生成模板', () => {
+check('100x100 正常生成模板', async () => {
   const img = { width: 100, height: 100 };
   const canvas = makeCanvasMock();
-  const result = beadEngine.generateTemplate(canvas, img, baseOptions());
+  const result = await beadEngine.generateTemplate(canvas, img, baseOptions());
   assert.ok(result && result.cols > 0 && result.rows > 0, '应返回含 cols/rows 的模板数据');
   assert.ok(Array.isArray(result.template), 'template 应为二维数组');
 });
@@ -102,3 +103,4 @@ check('错误文案不含 wxfile/tmp 等泄漏', () => {
 
 console.log(`\n维度守卫测试：${pass} 通过 / ${fail} 失败`);
 process.exit(fail === 0 ? 0 : 1);
+})();

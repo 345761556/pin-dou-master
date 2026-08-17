@@ -11,6 +11,7 @@
  *   B) 无近白不透明内容 + fillBackgroundWhite=true 时，透明区映射到完整色卡的「真白」，
  *      且真白计入 materialList（白豆数量正确）。
  */
+(async () => {
 const assert = require('assert');
 const beadEngine = require('../utils/beadEngine');
 
@@ -39,13 +40,13 @@ const palette = mkPalette([
 ]);
 
 let passed = 0, failed = 0;
-function test(name, fn) {
-  try { fn(); console.log('PASS | ' + name); passed++; }
+async function test(name, fn) {
+  try { await fn(); console.log('PASS | ' + name); passed++; }
   catch (e) { console.log('FAIL | ' + name + ' :: ' + e.message); failed++; }
 }
 
 // ============ A) 透明黑像素不占颜色预算 ============
-test('A) 含大量透明黑像素时 usedPalette 仅含真实不透明颜色（无杂色）', () => {
+test('A) 含大量透明黑像素时 usedPalette 仅含真实不透明颜色（无杂色）', async () => {
   const cols = 80, rows = 80; // 6400 像素 > SAMPLE_PIXELS(5000)，触发采样
   const buf = [];
   for (let i = 0; i < cols * rows; i++) {
@@ -57,7 +58,7 @@ test('A) 含大量透明黑像素时 usedPalette 仅含真实不透明颜色（�
       buf.push(0, 0, 0, 0);
     }
   }
-  const tpl = beadEngine.generateTemplate(
+  const tpl = await beadEngine.generateTemplate(
     makeMockCanvas(buf), { width: cols, height: rows },
     { beadSize: 29, maxBeadWidth: cols, colorCount: 4, palette, useDithering: false }
   );
@@ -69,7 +70,7 @@ test('A) 含大量透明黑像素时 usedPalette 仅含真实不透明颜色（�
 });
 
 // ============ B) 无近白不透明内容时，透明区映射到完整色卡的「真白」并计入材料 ============
-test('B) 透明背景 + fillBackgroundWhite：透明区映射真白 W01 且白豆计数正确', () => {
+test('B) 透明背景 + fillBackgroundWhite：透明区映射真白 W01 且白豆计数正确', async () => {
   // 2×2：红、透明、红、透明（无任何不透明白色）
   const buf = [
     200, 0, 0, 255,   // (0,0) 红
@@ -77,7 +78,7 @@ test('B) 透明背景 + fillBackgroundWhite：透明区映射真白 W01 且白�
     200, 0, 0, 255,   // (1,0) 红
     0, 0, 0, 0,       // (1,1) 透明
   ];
-  const tpl = beadEngine.generateTemplate(
+  const tpl = await beadEngine.generateTemplate(
     makeMockCanvas(buf), { width: 2, height: 2 },
     { beadSize: 29, maxBeadWidth: 2, colorCount: 3, palette, useDithering: false, fillBackgroundWhite: true }
   );
@@ -100,14 +101,14 @@ test('B) 透明背景 + fillBackgroundWhite：透明区映射真白 W01 且白�
 });
 
 // ============ C) 回归：含不透明白时，透明区仍映射真白（不退化） ============
-test('C) 含不透明白时，fillBackgroundWhite 透明区仍映射 W01', () => {
+test('C) 含不透明白时，fillBackgroundWhite 透明区仍映射 W01', async () => {
   const buf = [
     255, 255, 255, 255, // (0,0) 不透明白
     0, 0, 0, 0,         // (0,1) 透明
     200, 0, 0, 255,     // (1,0) 红
     0, 0, 0, 0,         // (1,1) 透明
   ];
-  const tpl = beadEngine.generateTemplate(
+  const tpl = await beadEngine.generateTemplate(
     makeMockCanvas(buf), { width: 2, height: 2 },
     { beadSize: 29, maxBeadWidth: 2, colorCount: 3, palette, useDithering: false, fillBackgroundWhite: true }
   );
@@ -119,3 +120,4 @@ test('C) 含不透明白时，fillBackgroundWhite 透明区仍映射 W01', () =>
 
 console.log(`\n结果：${passed} 通过 / ${failed} 失败`);
 process.exit(failed === 0 ? 0 : 1);
+})();

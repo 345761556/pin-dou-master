@@ -122,8 +122,20 @@ function rgbToHex(r, g, b) {
 
 /**
  * RGB 转 LAB（CIE Lab 色彩空间，用于感知均匀的颜色距离计算）
+ *
+ * ⚡ 性能：RGB→Lab 量化缓存（Medium-2）
+ * matchToPalette 对每个不透明像素调用 rgbToLab（含 3 次 Math.pow 立方根），
+ * 8000 像素级生成是单点最重路径（最多 ~24000 次 pow）。Lab 是 RGB 的纯函数，
+ * 按精确 (r,g,b) 记忆化可零行为变更地削峰——白/黑/常见色与抖动后重复值在精确 key 下命中率极高。
+ * 注：若可接受 ~1/8 每通道的极小 Lab 近似，可把 key 改为 (r>>3,g>>3,b>>3) 进一步提命中率；
+ *     此处用精确 key 保证输出与改动前逐字节一致（现有等价测试即锁此不变性）。
+ * 守卫：缓存上限 30 万条，超限整体清空，避免跨多次生成无限增长。
  */
+const _labCache = new Map();
 function rgbToLab(r, g, b) {
+  const key = ((r & 0xff) << 16) | ((g & 0xff) << 8) | (b & 0xff);
+  const cached = _labCache.get(key);
+  if (cached) return cached;
   // RGB -> XYZ
   let rr = r / 255, gg = g / 255, bb = b / 255;
   rr = rr > 0.04045 ? Math.pow((rr + 0.055) / 1.055, 2.4) : rr / 12.92;
@@ -136,11 +148,14 @@ function rgbToLab(r, g, b) {
   const fx = x > 0.008856 ? Math.pow(x, 1 / 3) : (7.787 * x) + 16 / 116;
   const fy = y > 0.008856 ? Math.pow(y, 1 / 3) : (7.787 * y) + 16 / 116;
   const fz = z > 0.008856 ? Math.pow(z, 1 / 3) : (7.787 * z) + 16 / 116;
-  return {
+  const lab = {
     l: (116 * fy) - 16,
     a: 500 * (fx - fy),
     b: 200 * (fy - fz)
   };
+  if (_labCache.size > 300000) _labCache.clear();
+  _labCache.set(key, lab);
+  return lab;
 }
 
 /**
@@ -346,7 +361,8 @@ function generateTemplate(canvas, image, options, onProgress) {
     maxBeadWidth = CONSTANTS.DEFAULT_COLS,
     colorCount = 30,
     palette = [],
-    useDithering = true
+    useDithering = true,
+    shouldCancel = null
   } = options;
 
   if (!palette || palette.length === 0) {
@@ -384,6 +400,10 @@ function generateTemplate(canvas, image, options, onProgress) {
 
   if (onProgress) onProgress(5);
 
+  // 真正耗时的绘制/量化/匹配/抖动封装为异步 Promise，按行分块让出主线程，
+  // 使 onProgress 的 setData 能真实 paint、UI 不长时间卡死（High-1 修复）。
+  // 顶部尺寸/调色板校验保持同步抛错（快速失败，便于调用方立即捕获）。
+  return (async () => {
   // 2. 将图片缩小到 cols x rows 的临时 Canvas
   const tempCanvas = canvas;
   tempCanvas.width = cols;
@@ -452,6 +472,20 @@ function generateTemplate(canvas, image, options, onProgress) {
   const template = []; // template[row][col] = colorId
   const materialStats = {}; // { colorId: { count, color } }
 
+  // —— High-1 / Medium-3 配套 ——
+  // yieldToMain：让出主线程一个 macrotask，使 onProgress 的 setData 能真实 paint、UI 不长时间冻结。
+  const yieldToMain = () => new Promise(resolve => setTimeout(resolve, 0));
+  // 分块行数：把整段匹配/抖动切成约 24 块，平衡「进度可见」与「让出开销」。
+  const CHUNK_ROWS = Math.max(1, Math.ceil(rows / 24));
+  // 取消检查：页面已卸载等场景下立即中止（避免对已死页面 setData）。调用方可传 shouldCancel。
+  const checkCancel = () => {
+    if (shouldCancel && shouldCancel()) {
+      const e = new Error('generation cancelled');
+      e.__cancel = true;
+      throw e;
+    }
+  };
+
   if (useDithering) {
     // Floyd-Steinberg 误差扩散抖动算法
     //
@@ -466,6 +500,17 @@ function generateTemplate(canvas, image, options, onProgress) {
     //
     // 扩散方向：右(7/16) → 左下(3/16) → 下(5/16) → 右下(1/16)
     // 扫描顺序：从左到右，从上到下（蛇形扫描可进一步减少伪影）
+    //
+    // ⚡ Medium-3 修复：diffuse 闭包提到循环外定义一次（仅捕获 data/cols/rows，误差分量作参数传入），
+    //    避免原「每像素 new 一次箭头函数 + 闭包」的分配开销。
+    const diffuse = (px, py, factor, eR, eG, eB) => {
+      if (px >= 0 && px < cols && py >= 0 && py < rows) {
+        const i = (py * cols + px) * 4;
+        data[i] = Math.max(0, Math.min(255, data[i] + eR * factor));
+        data[i + 1] = Math.max(0, Math.min(255, data[i + 1] + eG * factor));
+        data[i + 2] = Math.max(0, Math.min(255, data[i + 2] + eB * factor));
+      }
+    };
     for (let y = 0; y < rows; y++) {
       template[y] = [];
       for (let x = 0; x < cols; x++) {
@@ -498,9 +543,7 @@ function generateTemplate(canvas, image, options, onProgress) {
           continue;
         }
 
-        const oldPixel = { r, g, b };
         const matched = matchToPalette(r, g, b, matchPalette);
-
         template[y][x] = matched.id;
 
         // 统计材料（空位已在上面 continue，此处只处理不透明像素）
@@ -510,28 +553,22 @@ function generateTemplate(canvas, image, options, onProgress) {
         materialStats[matched.id].count++;
 
         // 计算误差并扩散（仅不透明像素）
-        const newPixel = { r: matched.r, g: matched.g, b: matched.b };
-        const errR = oldPixel.r - newPixel.r;
-        const errG = oldPixel.g - newPixel.g;
-        const errB = oldPixel.b - newPixel.b;
+        const errR = r - matched.r;
+        const errG = g - matched.g;
+        const errB = b - matched.b;
 
-        const diffuse = (px, py, factor) => {
-          if (px >= 0 && px < cols && py >= 0 && py < rows) {
-            const i = (py * cols + px) * 4;
-            data[i] = Math.max(0, Math.min(255, data[i] + errR * factor));
-            data[i + 1] = Math.max(0, Math.min(255, data[i + 1] + errG * factor));
-            data[i + 2] = Math.max(0, Math.min(255, data[i + 2] + errB * factor));
-          }
-        };
-
-        diffuse(x + 1, y, 7 / 16);
-        diffuse(x - 1, y + 1, 3 / 16);
-        diffuse(x, y + 1, 5 / 16);
-        diffuse(x + 1, y + 1, 1 / 16);
+        diffuse(x + 1, y, 7 / 16, errR, errG, errB);
+        diffuse(x - 1, y + 1, 3 / 16, errR, errG, errB);
+        diffuse(x, y + 1, 5 / 16, errR, errG, errB);
+        diffuse(x + 1, y + 1, 1 / 16, errR, errG, errB);
       }
 
-      if (onProgress) {
-        onProgress(50 + Math.round((y / rows) * 40));
+      // 完成整行后才让出：保证本行内「右扩散」已完成、下行「下扩散」目标行尚未处理，
+      // 跨块边界仍严格行序，Floyd-Steinberg 正确性不受影响。
+      if ((y + 1) % CHUNK_ROWS === 0 || y === rows - 1) {
+        checkCancel();
+        if (onProgress) onProgress(50 + Math.round(((y + 1) / rows) * 40));
+        await yieldToMain();
       }
     }
   } else {
@@ -570,8 +607,10 @@ function generateTemplate(canvas, image, options, onProgress) {
         materialStats[matched.id].count++;
       }
 
-      if (onProgress) {
-        onProgress(50 + Math.round((y / rows) * 40));
+      if ((y + 1) % CHUNK_ROWS === 0 || y === rows - 1) {
+        checkCancel();
+        if (onProgress) onProgress(50 + Math.round(((y + 1) / rows) * 40));
+        await yieldToMain();
       }
     }
   }
@@ -591,17 +630,18 @@ function generateTemplate(canvas, image, options, onProgress) {
   if (onProgress) onProgress(100);
 
   return {
-    template,           // 二维数组 [row][col] = colorId | null（null 表示空位/不放置珠子）
+    template,
     cols,
     rows,
     totalBeads,
     colorCount: materialList.length,
-    materialList,       // [{count, color: {id, name, hex, r, g, b}}]
-    physicalWidth,      // 毫米
-    physicalHeight,     // 毫米
-    beadSize,           // 毫米
-    usedPalette         // 本次使用的色卡子集
+    materialList,
+    physicalWidth,
+    physicalHeight,
+    beadSize,
+    usedPalette
   };
+  })();
 }
 
 

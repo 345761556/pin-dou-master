@@ -5,6 +5,7 @@
  *            → renderTemplate 重显（验证 slim 后字段足够）
  * 验证核心功能在 16 处缺陷修复后仍正常工作，且未引入新 bug。
  */
+(async () => {
 const assert = require('assert');
 const beadEngine = require('../utils/beadEngine.js');
 const colorData = require('../utils/colorData.js');
@@ -63,7 +64,7 @@ function makeCanvasMock(buf, w, h) {
   return { width: 0, height: 0, getContext: () => ctx };
 }
 
-const tpl = beadEngine.generateTemplate(
+const tpl = await beadEngine.generateTemplate(
   makeCanvasMock(makeImgBuf(pix), W, H),
   { width: W, height: H },
   { beadSize: 29, maxBeadWidth: util.CONSTANTS.DEFAULT_COLS, colorCount: 40, palette, useDithering: false, fillBackgroundWhite: false }
@@ -141,3 +142,4 @@ check('renderTemplate 可用 slim 后数据重显', () => {
 
 console.log('\n' + (fail === 0 ? 'ALL PASS' : 'HAS FAIL') + ' — pass=' + pass + ' fail=' + fail);
 process.exit(fail === 0 ? 0 : 1);
+})();

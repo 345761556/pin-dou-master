@@ -34,7 +34,9 @@ if (renderCanvasSection) {
 }
 
 // 2) _getExportCanvas 的 canvas not found 仍保持 log.warn（未被修改）
-const exportGuardMatch = /_getExportCanvas[\s\S]{0,500}log\.warn/.exec(src);
+//    锚定函数定义（Medium-5 复用了 export canvas node，缓存分支把失败告警推到了函数更深处，
+//    故将窗口放大到 2000 字符，仅校验「函数仍保留 log.warn 告警」这一防护意图）
+const exportGuardMatch = /_getExportCanvas\(params,\s*logPrefix\)\s*\{[\s\S]{0,2000}log\.warn/.exec(src);
 ok('_getExportCanvas 仍含 log.warn（未被误改）', !!exportGuardMatch);
 
 // 3) 统一日志通道：log 来自 security.js，不得残留 console.error/console.warn

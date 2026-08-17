@@ -26,6 +26,11 @@ const MAX_EXPORT_BITMAP_BYTES = 33 * 1024 * 1024;
 // 注：单靠 4096 维度限制仍不足以防低端机 OOM（4096×4096×4 ≈ 64MB > 33MB 预算），故叠加上面的位图内存预算。
 const MAX_CANVAS_SIDE = 4096;
 
+// 保存 / 分享统一导出候选 cellSize（从清晰到兼容逐级降级）。
+// 二者共用同一份候选，保证「保存到相册」与「制作分享图」输出清晰度一致（避免分享图比保存图糊）。
+// 位图内存预算(_generateExportImage 内 MAX_EXPORT_BITMAP_BYTES)会自动跳过超大候选，故共享安全。
+const EXPORT_CELL_CANDIDATES = [50, 40, 30, 25, 20, 18, 15, 12, 10, 8];
+
 Page({
   data: {
     cols: 0,
@@ -430,15 +435,20 @@ Page({
 
   // 带重试机制的获取导出 Canvas（Promise 化，消除回调嵌套）
   _getExportCanvas(params, logPrefix) {
+    // ⚡ Medium-5：复用同一 export canvas node（后续仅 resize），避免每个候选都重查节点。
+    // 首个候选查询成功后缓存节点；后续候选（罕见的多候选重绘场景）直接复用，省去重复 select 查询。
+    if (this._exportCanvasNode) {
+      return Promise.resolve(this._exportCanvasNode);
+    }
     return new Promise((resolve, reject) => {
       const maxRetries = 3;
       const attempt = (retryCount) => {
         wx.createSelectorQuery()
-          .in(this)
           .select('#export-canvas')
           .fields({ node: true, size: true })
           .exec((res) => {
             if (res && res[0] && res[0].node) {
+              this._exportCanvasNode = res[0].node; // 缓存，供后续候选复用
               resolve(res[0].node);
               return;
             }
@@ -553,7 +563,7 @@ Page({
 
       log.info('[saveTemplate] start generating export image...');
       tempPath = await this._generateExportImage({
-        candidates: [50, 40, 30, 25, 20, 18, 15, 12, 10, 8],
+        candidates: EXPORT_CELL_CANDIDATES,
         logPrefix: '[saveTemplate]',
         failMsg: '图片处理失败，请重试'
       });
@@ -666,7 +676,7 @@ Page({
       }
 
       const tempPath = await this._generateExportImage({
-        candidates: [40, 30, 25, 20, 15, 12, 10, 8],
+        candidates: EXPORT_CELL_CANDIDATES,
         logPrefix: '[shareTemplate]',
         failMsg: '制作分享图失败，请重试'
       });

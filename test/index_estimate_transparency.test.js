@@ -68,8 +68,12 @@ ok('chooseImage 选图后调用 _measureTransparency 统计占比',
 ok('onFillBackgroundChange 切换后刷新预估',
   /this\.setData\(\{\s*fillBackgroundWhite:\s*value\s*\}\);[\s\S]*?this\.updateEstimate\(\);/.test(jsSrc));
 ok('_measureTransparency 失败一律归零（不抛、不崩）',
-  /_measureTransparency\(imagePath\)\s*\{\s*return new Promise/.test(jsSrc) &&
+  /_measureTransparency\(imagePath,\s*timeoutMs\s*=\s*1500\)\s*\{\s*return new Promise/.test(jsSrc) &&
   /catch \(e\)\s*\{\s*log\.warn\('\[_measureTransparency\]/.test(jsSrc));
+ok('Medium-Low-1：_measureTransparency 带超时兜底（settled 守卫 + setTimeout 退回 0），防止永久挂起',
+  /let settled = false/.test(jsSrc) &&
+  /const done = \(v\) =>/.test(jsSrc) &&
+  /setTimeout\(\(\) => done\(0\), timeoutMs\)/.test(jsSrc));
 
 // 加载页面（触发 Page 注册 -> pageObj）
 require(path.join(root, 'pages/index/index.js'));
@@ -144,6 +148,20 @@ console.log('\n健壮性校验（_measureTransparency 兜底）：');
   const ratio2 = await pageObj._measureTransparency('wxfile://tmp/x.png');
   pageObj._pageAlive = true;
   ok('_measureTransparency 页面已卸载时安全返回 0', ratio2 === 0);
+
+  // Medium-Low-1：模拟 WeChat 偶发 canvas 销毁/解码卡死使 query.exec 回调永不触发
+  // -> 超时兜底应在 ~timeoutMs 内 resolve(0)，而非永久挂起 await 链
+  const origCreateSelectorQuery = global.wx.createSelectorQuery;
+  global.wx.createSelectorQuery = () => {
+    const q = { select() { return q; }, fields() { return q; }, exec() { /* 永不回调 */ } };
+    return q;
+  };
+  const t0 = Date.now();
+  const ratio3 = await pageObj._measureTransparency('wxfile://tmp/x.png', 40);
+  const dt = Date.now() - t0;
+  global.wx.createSelectorQuery = origCreateSelectorQuery;
+  ok('_measureTransparency exec 永不回调时超时兜底返回 0（未永久挂起）', ratio3 === 0);
+  ok('_measureTransparency 超时兜底按 timeoutMs 触发（非无限等待）', dt >= 20 && dt < 2000);
 
   console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
   process.exit(fail === 0 ? 0 : 1);

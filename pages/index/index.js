@@ -348,21 +348,34 @@ Page({
 
   // 一次性统计图片透明像素占比（供首页预估剔除透明空格，与实际生成 totalBeads 口径一致）
   // 透明阈值复用 beadEngine.TRANSPARENCY_ALPHA（128），保证预估/生成两处判定一致。
-  // 返回 [0,1]；任何失败（canvas 不可用/图片加载失败/页面已卸载）一律返回 0，
+  // 返回 [0,1]；任何失败（canvas 不可用/图片加载失败/页面已卸载/超时）一律返回 0，
   // 使预估退回"格子总数"上界——安全、不崩溃、不影响功能完整。
-  _measureTransparency(imagePath) {
+  // timeoutMs：兜底超时。WeChat 运行时偶发 canvas 节点销毁/图片解码卡死会导致
+  // query.exec 与 img.onload/onerror 都永不触发，使本 Promise 永不 settle，进而让
+  // chooseImage 里 await 永久挂起、updateEstimate 永不执行（静默功能缺失）。超时即退回上界预估。
+  _measureTransparency(imagePath, timeoutMs = 1500) {
     return new Promise((resolve) => {
-      if (this._pageAlive === false) { resolve(0); return; }
+      let settled = false;
+      let timer = null;
+      const done = (v) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        resolve(v);
+      };
+      timer = setTimeout(() => done(0), timeoutMs);
+
+      if (this._pageAlive === false) { done(0); return; }
       const query = wx.createSelectorQuery();
       query.select('#offscreen-canvas').fields({ node: true, size: true }).exec((res) => {
-        if (this._pageAlive === false) { resolve(0); return; }
-        if (!res[0] || !res[0].node) { resolve(0); return; }
+        if (this._pageAlive === false) { done(0); return; }
+        if (!res[0] || !res[0].node) { done(0); return; }
         try {
           const canvas = res[0].node;
           const ctx = canvas.getContext('2d');
           const img = canvas.createImage();
           img.onload = () => {
-            if (this._pageAlive === false) { resolve(0); return; }
+            if (this._pageAlive === false) { done(0); return; }
             try {
               // 透明占比是图像内容属性，与最终网格分辨率近似无关；
               // 直接按图片自然尺寸绘制统计，无需按 templateCols 重采样。
@@ -376,17 +389,17 @@ Page({
               for (let i = 3; i < data.length; i += 4) {
                 if (data[i] < TRANSPARENCY_ALPHA) transparent++;
               }
-              resolve(total > 0 ? transparent / total : 0);
+              done(total > 0 ? transparent / total : 0);
             } catch (e) {
               log.warn('[_measureTransparency] getImageData 失败，退回上界预估:', e);
-              resolve(0);
+              done(0);
             }
           };
-          img.onerror = () => { resolve(0); };
+          img.onerror = () => { done(0); };
           img.src = imagePath;
         } catch (e) {
           log.warn('[_measureTransparency] canvas 初始化失败，退回上界预估:', e);
-          resolve(0);
+          done(0);
         }
       });
     });
@@ -521,7 +534,7 @@ Page({
 
         // 加载图片
         const img = canvas.createImage();
-        img.onload = () => {
+        img.onload = async () => {
           // 页面存活守护：模板生成为长耗时同步计算（大图 + 中位切分 + 抖动），
           // 用户可能在图片异步加载/计算期间返回上一页或切换 tab，此时页面已卸载或隐藏。
           // 若仍执行 this.setData / wx.navigateTo / this.saveToHistory，会触发
@@ -532,8 +545,8 @@ Page({
             return;
           }
           try {
-            // 调用核心算法生成模板
-            const templateData = beadEngine.generateTemplate(
+            // 调用核心算法生成模板（异步：按行分块让出主线程，进度条真实可见，UI 不长时间冻结）
+            const templateData = await beadEngine.generateTemplate(
               canvas, img,
               {
                 beadSize: this.data.beadSize,
@@ -543,7 +556,8 @@ Page({
                 useDithering: this.data.useDithering,
                 beadType: this.data.beadType,
                 fillBackgroundWhite: this.data.fillBackgroundWhite, // 透明像素语义：false=空位 / true=当前色卡白色
-                maxPixels: MAX_PIXELS  // 行列乘积上限，防止存储溢出
+                maxPixels: MAX_PIXELS,  // 行列乘积上限，防止存储溢出
+                shouldCancel: () => this._pageAlive === false  // 长生成期间页面若被卸载，立即中止
               },
               (progress) => {
                 this.setData({ progress });
@@ -577,6 +591,8 @@ Page({
           } catch (err) {
             wx.hideLoading();
             this.setData({ generating: false });
+            // 长生成期间页面已卸载/隐藏：静默放弃，不再对已死页面跳转或提示
+            if (err && err.__cancel) return;
             // 安全加固：不向用户展示内部错误详情（与 template.js P2-1 一致），仅记录到控制台
             log.error('[generateTemplate] 模板生成失败:', err);
             wx.showToast({ title: '处理失败，请重试', icon: 'none' });

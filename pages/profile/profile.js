@@ -201,10 +201,9 @@ Page({
     // L2 修复：nickName 截断到 20 字符，避免脏数据写入；默认兜底保持原语义
     const nickName = ((this.data.editNickName || '').trim() || '拼豆爱好者').slice(0, 20);
     const avatarUrl = this.data.editAvatarUrl || '';
-    if (!nickName && !avatarUrl) {
-      wx.showToast({ title: '请先选择头像或昵称', icon: 'none' });
-      return;
-    }
+    // 说明：nickName 经 ((editNickName||'').trim() || '拼豆爱好者').slice(0,20) 计算，恒为 truthy
+    // （最小也为默认昵称）。原「!nickName && !avatarUrl」守卫的 !nickName 永为假、该守卫永不可达，
+    // 属死代码——已移除，避免「写了不生效」的误导。默认昵称即「至少含昵称」语义，保存始终可继续。
     const safeInfo = { nickName, avatarUrl };
     this.setData({
       hasUserInfo: true,
@@ -491,11 +490,27 @@ Page({
 
       // 加载图片到 Canvas
       const imgEl = canvas.createImage();
+      // 看门狗（与 index.js _measureTransparency 同源）：WeChat 偶发 canvas 节点销毁 / 图片解码卡死
+      // 会使 onload/onerror 都永不触发，若不兜底则本次取色静默无响应（不 setData、不 toast），
+      // 比崩溃更隐蔽。1.5s 超时退回提示，避免永久挂起；settled 守卫防超时与真实回调重复触发。
+      let pickerSettled = false;
+      const pickerTimer = setTimeout(() => {
+        if (pickerSettled) return;
+        pickerSettled = true;
+        wx.showToast({ title: '取色超时，请重试', icon: 'none' });
+      }, 1500);
+
       imgEl.onerror = () => {
+        if (pickerSettled) return;
+        pickerSettled = true;
+        clearTimeout(pickerTimer);
         wx.showToast({ title: '取色图片加载失败，请重试', icon: 'none' });
       };
 
       imgEl.onload = () => {
+        if (pickerSettled) return;
+        pickerSettled = true;
+        clearTimeout(pickerTimer);
         // 图片加载完成已是异步，期间用户可能已切走页面；再次确认存活，避免在隐藏页 setData。
         if (this._pageAlive === false) return;
         ctx.drawImage(imgEl, 0, 0, canvasW, canvasH);
