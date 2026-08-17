@@ -62,7 +62,7 @@ assert.ok(/Event\s*!==\s*['"]wxa_media_check['"]/.test(src), '源码应校验 Ev
   // 2) 合法微信推送（含信封）→ 写入
   written = [];
   r = await main({
-    MsgType: 'event', Event: 'wxa_media_check', appid: 'wx33440d447b366a9d',
+    MsgType: 'event', Event: 'wxa_media_check', appid: 'wx_test_appid_fixture',
     trace_id: 'push-1', errcode: 0, result: { suggest: 'pass', label: 100 }
   });
   assert.strictEqual(r.errmsg, 'ok', '合法推送应写入成功');
