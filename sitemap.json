@@ -1,0 +1,21 @@
+{
+  "desc": "关于本小程序的索引配置",
+  "rules": [
+    {
+      "action": "allow",
+      "page": "pages/index/index"
+    },
+    {
+      "action": "allow",
+      "page": "pages/gallery/gallery"
+    },
+    {
+      "action": "allow",
+      "page": "pages/profile/profile"
+    },
+    {
+      "action": "disallow",
+      "page": "pages/template/template"
+    }
+  ]
+}

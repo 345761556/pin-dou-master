@@ -1,0 +1,100 @@
+/* components/material-list/material-list.wxss */
+/* 材料清单卡片 */
+.material-card {
+  margin: 0 24rpx 24rpx;
+}
+
+/* 颜色分布条 */
+.color-chart {
+  display: flex;
+  height: 24rpx;
+  border-radius: 12rpx;
+  overflow: hidden;
+  margin-bottom: 32rpx;
+  background: #F0F0F0;
+}
+
+.chart-bar {
+  height: 100%;
+  transition: width 0.5s ease;
+  min-width: 4rpx;
+}
+
+/* 材料列表 */
+.material-list {
+  border-top: 1rpx solid var(--border-color);
+  border-bottom: 1rpx solid var(--border-color);
+}
+
+.material-header {
+  display: flex;
+  align-items: center;
+  padding: 16rpx 12rpx;
+  background: var(--bg-gray);
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  font-size: 24rpx;
+  color: var(--text-hint);
+  font-weight: 600;
+}
+
+.material-row {
+  display: flex;
+  align-items: center;
+  padding: 20rpx 12rpx;
+  border-bottom: 1rpx solid var(--border-color);
+}
+
+.material-row:last-child {
+  border-bottom: none;
+}
+
+.col-color { width: 60rpx; display: flex; justify-content: center; align-items: center; }
+.col-code { width: 80rpx; font-size: 24rpx; color: var(--text-hint); }
+.col-name { flex: 1; font-size: 26rpx; color: var(--text-primary); }
+.col-count { width: 120rpx; text-align: right; font-size: 26rpx; font-weight: 600; color: var(--text-primary); }
+.col-percent { width: 100rpx; text-align: right; font-size: 24rpx; color: var(--text-hint); }
+
+.color-dot {
+  width: 36rpx;
+  height: 36rpx;
+  border-radius: 50%;
+  border: 2rpx solid rgba(0, 0, 0, 0.1);
+  box-shadow: 0 2rpx 4rpx rgba(0, 0, 0, 0.1);
+}
+
+/* 合计 */
+.material-total {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 24rpx 0 0;
+  font-size: 28rpx;
+  color: var(--text-secondary);
+}
+
+.total-count {
+  font-size: 36rpx;
+  font-weight: 800;
+  color: var(--primary);
+}
+
+.total-size {
+  font-size: 24rpx;
+  color: var(--text-hint);
+}
+
+/* 复制按钮 */
+.copy-btn {
+  margin-top: 24rpx;
+  padding: 20rpx;
+  text-align: center;
+  background: var(--primary);
+  color: #FFF;
+  border-radius: var(--radius-md);
+  font-size: 28rpx;
+  font-weight: 600;
+}
+
+.copy-btn:active {
+  opacity: 0.85;
+}

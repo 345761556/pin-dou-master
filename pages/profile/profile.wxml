@@ -1,0 +1,184 @@
+<view class="page-profile">
+  <!-- 用户信息卡片 -->
+  <view class="user-card">
+    <view class="user-avatar">
+      <image wx:if="{{userInfo.avatarUrl}}" class="avatar-img" src="{{userInfo.avatarUrl}}" mode="aspectFill"></image>
+      <view class="avatar-default" wx:else>
+        <view class="avatar-bead" style="background:#FF6B6B"></view>
+      </view>
+    </view>
+    <view class="user-info">
+      <text class="user-name">{{userInfo.nickName || '拼豆爱好者'}}</text>
+      <text class="user-desc">已制作 {{totalTemplates}} 个模板</text>
+    </view>
+    <button class="login-btn" wx:if="{{!hasUserInfo}}" bindtap="showProfileEdit">
+      登录
+    </button>
+  </view>
+
+  <!-- 统计面板 -->
+  <view class="stats-panel card">
+    <view class="stat-item">
+      <text class="stat-num">{{totalTemplates}}</text>
+      <text class="stat-label">总模板</text>
+    </view>
+    <view class="stat-item">
+      <text class="stat-num">{{totalBeads}}</text>
+      <text class="stat-label">总拼豆数</text>
+    </view>
+    <view class="stat-item">
+      <text class="stat-num">{{totalColors}}</text>
+      <text class="stat-label">用色种类</text>
+    </view>
+  </view>
+
+  <!-- 功能入口网格 -->
+  <view class="card tools-card">
+    <view class="tools-grid">
+      <!-- 我的作品 -->
+      <view class="tool-grid-item" bindtap="goToGallery">
+        <view class="tool-icon-wrap">
+          <view class="tool-icon icon-image"></view>
+        </view>
+        <text class="tool-label">我的作品</text>
+      </view>
+      <!-- 清除历史 -->
+      <view class="tool-grid-item" bindtap="clearHistory">
+        <view class="tool-icon-wrap">
+          <view class="tool-icon icon-trash"></view>
+        </view>
+        <text class="tool-label">清除历史</text>
+      </view>
+      <!-- 色号查询 -->
+      <view class="tool-grid-item" bindtap="showColorPicker">
+        <view class="tool-icon-wrap">
+          <view class="tool-icon icon-target"></view>
+        </view>
+        <text class="tool-label">色号查询</text>
+      </view>
+      <!-- 使用教程 -->
+      <view class="tool-grid-item" bindtap="showTutorial">
+        <view class="tool-icon-wrap">
+          <view class="tool-icon icon-book"></view>
+        </view>
+        <text class="tool-label">使用教程</text>
+      </view>
+      <!-- 关于 -->
+      <view class="tool-grid-item" bindtap="showAbout">
+        <view class="tool-icon-wrap">
+          <view class="tool-icon icon-info"></view>
+        </view>
+        <text class="tool-label">关于</text>
+      </view>
+      <!-- 反馈 -->
+      <button class="tool-grid-item tool-grid-contact" open-type="contact">
+        <view class="tool-icon-wrap">
+          <view class="tool-icon icon-chat"></view>
+        </view>
+        <text class="tool-label">意见反馈</text>
+      </button>
+    </view>
+  </view>
+
+  <!-- 色号查询弹窗 -->
+  <view class="modal-mask" wx:if="{{showColorPicker}}" bindtap="hideColorPicker">
+    <view class="modal-content modal-content-large" catchtap>
+      <view class="modal-title">色号查询</view>
+
+      <!-- 图片上传/预览区 -->
+      <view class="picker-image-area" bindtap="uploadPickerImage">
+        <image wx:if="{{pickerImagePath}}" 
+          class="picker-image" 
+          src="{{pickerImagePath}}" 
+          mode="aspectFit"
+          catchtap="onPickerImageTap"
+        ></image>
+        <view wx:else class="picker-placeholder">
+          <view class="picker-placeholder-camera">
+            <view class="camera-body">
+              <view class="camera-lens"></view>
+            </view>
+          </view>
+          <text class="picker-placeholder-text">点击上传图片</text>
+        </view>
+      </view>
+
+      <!-- 隐藏的取色 Canvas -->
+      <canvas type="2d" id="picker-canvas"
+        style="width: 1px; height: 1px; position: absolute; left: -999px; top: -999px;"></canvas>
+      <!-- 压缩用 Canvas（与 index 对齐，确保送检前大图被压缩以通过内容安全体积守卫，M2 修复） -->
+      <canvas type="2d" id="__compress-canvas"
+        style="position: fixed; left: -9999px; top: -9999px; width: 1px; height: 1px;"></canvas>
+
+      <!-- 触摸提示 -->
+      <view class="picker-hint" wx:if="{{pickerImagePath}}">
+        <text>点击图片查询颜色</text>
+      </view>
+
+      <!-- 色卡标准 Tab -->
+      <palette-selector
+        metaList="{{paletteList}}"
+        activeKey="{{selectedPalette}}"
+        bind:change="onPaletteChange"
+      />
+
+      <!-- 查询结果 -->
+      <view class="picker-result" wx:if="{{pickedColor}}">
+        <view class="result-row">
+          <view class="result-item">
+            <view class="result-label">查询颜色</view>
+            <view class="result-color-row">
+              <view class="result-color-swatch" style="background: {{pickedColor.originalHex}}"></view>
+              <text class="result-hex">{{pickedColor.originalHex}}</text>
+            </view>
+          </view>
+
+          <view class="result-item">
+            <view class="result-label">匹配色号</view>
+            <view class="result-match-row">
+              <view class="match-swatch" style="background: {{pickedColor.matchedHex}}"></view>
+              <view class="match-info">
+                <text class="match-name">{{pickedColor.name}}</text>
+                <text class="match-id">{{pickedColor.id}}</text>
+              </view>
+            </view>
+          </view>
+        </view>
+
+        <view class="result-meta">
+          <text class="meta-label">色差 ΔE {{pickedColor.deltaE}}</text>
+          <text class="meta-desc">0-3 几乎无差 | 3-5 轻微差别 | 5-10 明显差别 | >10 较大差别</text>
+        </view>
+      </view>
+
+      <view class="modal-close" bindtap="hideColorPicker">关闭</view>
+    </view>
+  </view>
+
+  <!-- 资料编辑弹窗（chooseAvatar + nickname 输入，替代已废弃的 getUserInfo） -->
+  <view class="modal-mask" wx:if="{{showProfileEdit}}" bindtap="hideProfileEdit">
+    <view class="modal-content profile-edit" catchtap>
+      <view class="modal-title">完善资料</view>
+
+      <button class="edit-avatar" open-type="chooseAvatar" bindchooseavatar="onChooseAvatar">
+        <image wx:if="{{editAvatarUrl}}" class="edit-avatar-img" src="{{editAvatarUrl}}" mode="aspectFill"></image>
+        <view wx:else class="edit-avatar-default">
+          <view class="avatar-bead" style="background:#FF6B6B"></view>
+        </view>
+        <text class="edit-avatar-tip">点击选择头像</text>
+      </button>
+
+      <input class="edit-nickname"
+        type="nickname"
+        placeholder="点击使用微信昵称"
+        placeholder-class="edit-nickname-ph"
+        value="{{editNickName}}"
+        bindinput="onNicknameInput"
+        bindblur="onNicknameBlur"
+        bindnicknamereview="onNicknameReview" />
+
+      <button class="edit-save" bindtap="saveProfile">保存</button>
+      <view class="modal-close" bindtap="hideProfileEdit">取消</view>
+    </view>
+  </view>
+</view>

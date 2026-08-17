@@ -1,0 +1,6 @@
+{
+  "usingComponents": {
+    "material-list": "/components/material-list/material-list"
+  },
+  "navigationBarTitleText": "拼豆模板"
+}

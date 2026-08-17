@@ -1,0 +1,9 @@
+{
+  "name": "secCheck",
+  "version": "1.0.0",
+  "description": "图片内容安全检测云函数（security.mediaCheckAsync 异步云调用封装）",
+  "main": "index.js",
+  "dependencies": {
+    "wx-server-sdk": "^2.6.20"
+  }
+}

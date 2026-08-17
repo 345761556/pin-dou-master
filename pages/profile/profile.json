@@ -1,0 +1,6 @@
+{
+  "usingComponents": {
+    "palette-selector": "/components/palette-selector/palette-selector"
+  },
+  "navigationBarTitleText": "我的"
+}

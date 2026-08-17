@@ -1,0 +1,12 @@
+<scroll-view scroll-x class="palette-tabs" enhanced show-scrollbar="{{false}}">
+  <view
+    class="palette-tab {{activeKey === item.key ? 'active' : ''}}"
+    wx:for="{{metaList}}"
+    wx:key="key"
+    data-key="{{item.key}}"
+    bindtap="onTap"
+  >
+    <text class="tab-name">{{item.name}}</text>
+    <text class="tab-count">{{item.colors.length}}色</text>
+  </view>
+</scroll-view>

@@ -1,0 +1,18 @@
+{
+  "__usePrivacyCheck__": true,
+  "desc": "本小程序会使用以下权限，用于提供拼豆模板服务：",
+  "rules": [
+    {
+      "action": "saveImageToPhotosAlbum",
+      "desc": "保存拼豆模板图片到您的相册，方便您参考制作"
+    },
+    {
+      "action": "chooseMedia",
+      "desc": "选择图片或视频用于生成拼豆模板"
+    },
+    {
+      "action": "chooseAvatar",
+      "desc": "选择微信头像用于个人资料展示"
+    }
+  ]
+}

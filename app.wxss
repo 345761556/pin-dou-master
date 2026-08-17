@@ -1,0 +1,198 @@
+/* app.wxss - 全局样式 */
+page {
+  font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', 'PingFang SC',
+    'Microsoft YaHei', sans-serif;
+  font-size: 28rpx;
+  color: #333333;
+  background-color: #F8F8F8;
+  box-sizing: border-box;
+}
+
+/* 主题色变量（通过CSS自定义属性实现） */
+page {
+  --primary: #FF6B6B;
+  --primary-dark: #E55A5A;
+  --primary-light: #FF9A9A;
+  --secondary: #4ECDC4;
+  --secondary-dark: #3DBDB5;
+  --accent: #FFE66D;
+  --text-primary: #333333;
+  --text-secondary: #666666;
+  --text-hint: #999999;
+  --bg-white: #FFFFFF;
+  --bg-gray: #F8F8F8;
+  --bg-light: #F0F0F0;
+  --border-color: #EEEEEE;
+  --primary-gradient: linear-gradient(135deg, #FF6B6B, #E55A5A);
+  --primary-gradient-soft: linear-gradient(135deg, #FF6B6B 0%, #FF8E8E 50%, #FFB4B4 100%);
+  --text-on-primary: #FFFFFF;
+  --shadow-sm: 0 2rpx 8rpx rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 4rpx 16rpx rgba(0, 0, 0, 0.1);
+  --shadow-lg: 0 8rpx 32rpx rgba(0, 0, 0, 0.15);
+  --radius-sm: 8rpx;
+  --radius-md: 16rpx;
+  --radius-lg: 24rpx;
+  --radius-xl: 32rpx;
+
+  /* 动效 */
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-smooth: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* 动效工具类 */
+.fade-in {
+  animation: fadeIn 0.3s var(--ease-smooth) both;
+}
+
+.slide-up {
+  animation: slideUp 0.35s var(--ease-spring) both;
+}
+
+.scale-on-tap:active {
+  transform: scale(0.96);
+  transition: transform 0.15s var(--ease-smooth);
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(20rpx); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* 通用容器 */
+.container {
+  padding: 24rpx;
+  min-height: 100vh;
+}
+
+/* 卡片样式 */
+.card {
+  background: var(--bg-white);
+  border-radius: var(--radius-lg);
+  padding: 32rpx;
+  margin-bottom: 24rpx;
+  box-shadow: var(--shadow-sm);
+  transition: transform 0.2s var(--ease-smooth), box-shadow 0.2s var(--ease-smooth);
+}
+
+/* 主按钮 */
+.btn-primary {
+  background: var(--primary-gradient);
+  color: var(--text-on-primary);
+  border: none;
+  border-radius: var(--radius-xl);
+  padding: 24rpx 48rpx;
+  font-size: 32rpx;
+  font-weight: 600;
+  text-align: center;
+  line-height: 1.5;
+  box-shadow: 0 6rpx 20rpx rgba(255, 107, 107, 0.35);
+  transition: all 0.3s ease;
+}
+
+.btn-primary:active {
+  transform: scale(0.97);
+  box-shadow: 0 2rpx 8rpx rgba(255, 107, 107, 0.25);
+}
+
+.btn-primary::after {
+  border: none;
+}
+
+/* 次按钮 */
+.btn-secondary {
+  background: var(--bg-white);
+  color: var(--primary);
+  border: 2rpx solid var(--primary);
+  border-radius: var(--radius-xl);
+  padding: 22rpx 48rpx;
+  font-size: 32rpx;
+  font-weight: 600;
+  text-align: center;
+}
+
+.btn-secondary::after {
+  border: none;
+}
+
+/* 标签样式 */
+.section-title {
+  font-size: 32rpx;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 24rpx;
+  display: flex;
+  align-items: center;
+}
+
+.section-title::before {
+  content: '';
+  display: inline-block;
+  width: 6rpx;
+  height: 32rpx;
+  background: var(--primary);
+  border-radius: 3rpx;
+  margin-right: 16rpx;
+}
+
+/* Flex 工具类 */
+.flex-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+}
+
+.flex-col {
+  display: flex;
+  flex-direction: column;
+}
+
+.flex-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.flex-between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.flex-wrap {
+  flex-wrap: wrap;
+}
+
+.flex-1 {
+  flex: 1;
+}
+
+/* 安全底部间距（适配 iPhone 底部安全区） */
+.safe-bottom {
+  padding-bottom: constant(safe-area-inset-bottom);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+/* 空状态 */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 120rpx 0;
+}
+
+.empty-state .empty-icon {
+  font-size: 120rpx;
+  margin-bottom: 32rpx;
+  opacity: 0.3;
+}
+
+.empty-state .empty-text {
+  font-size: 28rpx;
+  color: var(--text-hint);
+}

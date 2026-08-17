@@ -1,0 +1,190 @@
+<view class="page-index">
+  <!-- 轻量头部 -->
+  <view class="app-header">
+    <text class="app-title">拼豆格子</text>
+    <text class="app-subtitle">上传图片，一键转换拼豆模板</text>
+  </view>
+
+  <!-- Step 1: 选择图片 -->
+  <view class="card step-card">
+    <view class="step-header">
+      <view class="step-indicator">
+        <text class="step-num">1</text>
+      </view>
+      <text class="step-title">选择图片</text>
+    </view>
+
+    <!-- 未上传状态 -->
+    <view class="upload-area" wx:if="{{!imagePath}}" bindtap="chooseImage">
+      <view class="upload-icon-wrap">
+        <view class="icon-camera-body">
+          <view class="icon-camera-lens"></view>
+        </view>
+      </view>
+      <text class="upload-text">点击上传图片</text>
+      <text class="upload-hint">支持 JPG / PNG，建议正方形效果最佳</text>
+    </view>
+
+    <!-- 已上传状态 -->
+    <view class="preview-area" wx:else>
+      <image class="preview-image" src="{{imagePath}}" mode="aspectFit"></image>
+      <view class="preview-actions">
+        <view class="action-btn" bindtap="chooseImage">重新选择</view>
+      </view>
+    </view>
+  </view>
+
+  <!-- Step 2: 调整参数（上传图片后显示） -->
+  <view class="card step-card" wx:if="{{imagePath}}">
+    <view class="step-header">
+      <view class="step-indicator">
+        <text class="step-num">2</text>
+      </view>
+      <text class="step-title">调整参数</text>
+    </view>
+
+    <!-- 核心参数 -->
+    <view class="param-section">
+      <!-- 模板宽度 -->
+      <view class="param-row">
+        <text class="param-label">模板宽度</text>
+        <view class="param-control">
+          <slider class="width-slider" min="{{colMin}}" max="{{colMax}}" value="{{templateCols}}" step="1"
+            bindchange="debouncedOnColsChange" show-value activeColor="#FF6B6B" />
+          <text class="slider-unit">列</text>
+        </view>
+      </view>
+
+      <!-- 色卡选择 -->
+      <view class="param-row" bindtap="showPaletteModal">
+        <text class="param-label">色卡选择</text>
+        <view class="param-value">
+          <view class="palette-dot-row">
+            <view class="palette-dot" wx:for="{{colorChartPreview}}" wx:key="id"
+              style="background: {{item.hex}}"></view>
+          </view>
+          <text class="param-value-text">{{selectedPaletteName}}</text>
+          <text class="arrow">›</text>
+        </view>
+      </view>
+
+      <!-- 拼豆形状 -->
+      <view class="param-row">
+        <text class="param-label">拼豆形状</text>
+        <view class="shape-selector">
+          <view class="shape-option {{beadType === 'square' ? 'active' : ''}}" bindtap="selectShape" data-type="square">
+            <view class="shape-icon square-icon"></view>
+            <text>方形</text>
+          </view>
+          <view class="shape-option {{beadType === 'circle' ? 'active' : ''}}" bindtap="selectShape" data-type="circle">
+            <view class="shape-icon circle-icon"></view>
+            <text>圆形</text>
+          </view>
+        </view>
+      </view>
+    </view>
+
+    <!-- 高级选项折叠按钮 -->
+    <view class="advanced-toggle" bindtap="toggleAdvanced">
+      <text class="advanced-toggle-text">
+        {{isAdvancedOpen ? '收起高级选项' : '展开高级选项'}}
+      </text>
+      <view class="advanced-toggle-arrow {{isAdvancedOpen ? 'open' : ''}}">›</view>
+    </view>
+
+    <!-- 高级参数区域（可折叠） -->
+    <view class="advanced-section {{isAdvancedOpen ? 'open' : ''}}">
+      <!-- 拼豆规格 -->
+      <view class="param-row">
+        <text class="param-label">拼豆规格</text>
+        <view class="param-value" bindtap="showSizePicker">
+          <text class="param-value-text">{{currentSizeLabel}}</text>
+          <text class="arrow">›</text>
+        </view>
+      </view>
+
+      <!-- 颜色数量 -->
+      <view class="param-row">
+        <text class="param-label">颜色数量</text>
+        <view class="param-control">
+          <slider class="width-slider" min="2" max="{{colorCountMax}}" value="{{colorCount}}" step="1"
+            bindchange="debouncedOnColorCountChange" show-value activeColor="#FF6B6B" />
+          <text class="slider-unit">种</text>
+        </view>
+      </view>
+
+      <!-- 抖动增强 -->
+      <view class="param-row">
+        <text class="param-label">抖动增强</text>
+        <switch checked="{{useDithering}}" bindchange="onDitheringChange"
+          color="#FF6B6B" />
+      </view>
+
+      <!-- 背景填充白色 -->
+      <view class="param-row">
+        <view class="param-label-col">
+          <text class="param-label">背景填充白色</text>
+          <text class="param-hint">关闭：透明区不拼（镂空）；开启：透明区拼成白色背景</text>
+        </view>
+        <switch checked="{{fillBackgroundWhite}}" bindchange="onFillBackgroundChange"
+          color="#FF6B6B" />
+      </view>
+    </view>
+  </view>
+
+  <!-- 制作按钮 -->
+  <view class="generate-section" wx:if="{{imagePath}}">
+    <view class="btn-primary generate-btn {{generating ? 'disabled' : ''}}" bindtap="generateTemplate">
+      <text wx:if="{{!generating}}">开始制作模板</text>
+      <text wx:else>制作中 {{progress}}%...</text>
+    </view>
+  </view>
+
+  <!-- 预估信息 -->
+  <view class="estimate-info" wx:if="{{imagePath && !generating}}">
+    <!-- 正常路径：展示预估数量与尺寸（与修复前一致） -->
+    <block wx:if="{{estimateInfo.totalBeads !== '-'}}">
+      <text class="estimate-text">预估约 <text class="highlight">{{estimateInfo.totalBeads}}</text> 颗拼豆</text>
+      <text class="estimate-divider">|</text>
+      <text class="estimate-text">尺寸约 <text class="highlight">{{estimateInfo.size}}</text></text>
+    </block>
+    <!-- 兜底：图片尺寸不可用（压缩失败且补取尺寸失败）时不显示误导性的「0 颗」 -->
+    <text class="estimate-text" wx:else>预估 <text class="highlight">尺寸未知</text></text>
+  </view>
+
+  <!-- 离屏 Canvas（用于图片处理，不可见） -->
+  <canvas type="2d" id="offscreen-canvas"
+    style="position: fixed; left: -9999px; top: -9999px; width: 1px; height: 1px;">
+  </canvas>
+  <!-- 压缩用 Canvas -->
+  <canvas type="2d" id="__compress-canvas"
+    style="position: fixed; left: -9999px; top: -9999px; width: 1px; height: 1px;">
+  </canvas>
+
+  <!-- 色卡选择弹窗 -->
+  <view class="modal-mask" wx:if="{{showPaletteModal}}" bindtap="hidePaletteModal">
+    <view class="modal-content modal-content-large" catchtap>
+      <view class="modal-title">选择色卡</view>
+
+      <!-- 色卡标准 Tab -->
+      <palette-selector
+        metaList="{{paletteList}}"
+        activeKey="{{selectedPalette}}"
+        bind:change="onPaletteChange"
+      />
+
+      <!-- 当前色卡颜色列表 -->
+      <scroll-view scroll-y class="color-grid-scroll">
+        <view class="color-grid">
+          <view class="color-chip" wx:for="{{colorChart}}" wx:key="id">
+            <view class="chip-color" style="background: {{item.hex}}"></view>
+            <text class="chip-name">{{item.name}}</text>
+            <text class="chip-id">{{item.id}}</text>
+          </view>
+        </view>
+      </scroll-view>
+
+      <view class="modal-close" bindtap="hidePaletteModal">关闭</view>
+    </view>
+  </view>
+</view>

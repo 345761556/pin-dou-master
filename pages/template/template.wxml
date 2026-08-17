@@ -1,0 +1,106 @@
+<view class="page-template">
+  <!-- 顶部信息栏 -->
+  <view class="info-bar">
+    <view class="info-item">
+      <text class="info-value">{{totalBeads}}</text>
+      <text class="info-label">拼豆总数</text>
+    </view>
+    <view class="info-divider"></view>
+    <view class="info-item">
+      <text class="info-value">{{cols}}×{{rows}}</text>
+      <text class="info-label">模板尺寸</text>
+    </view>
+    <view class="info-divider"></view>
+    <view class="info-item">
+      <text class="info-value">{{colorCount}}</text>
+      <text class="info-label">颜色数</text>
+    </view>
+    <view class="info-divider"></view>
+    <view class="info-item">
+      <text class="info-value">{{physicalSize}}</text>
+      <text class="info-label">成品尺寸</text>
+    </view>
+  </view>
+
+  <!-- 模板画布 -->
+  <view class="canvas-wrapper card">
+    <view class="canvas-header flex-between">
+      <view class="section-title" style="margin-bottom:0">模板预览</view>
+      <view class="zoom-controls">
+        <text class="zoom-btn" bindtap="zoomOut">－</text>
+        <text class="zoom-level">{{zoomPercent}}%</text>
+        <text class="zoom-btn" bindtap="zoomIn">＋</text>
+      </view>
+    </view>
+
+    <view wx:if="{{exportLabelHint}}" class="label-hint">
+      <text class="label-hint-icon">💡</text>
+      <text class="label-hint-text">当前为缩小预览，导出图片会按 ≥80% 清晰度生成并保留行列标号</text>
+    </view>
+
+    <scroll-view class="canvas-scroll" scroll-x scroll-y enhanced show-scrollbar
+      min-x="{{canvasMinX}}" min-y="{{canvasMinY}}">
+      <canvas type="2d" id="template-canvas"
+        style="width: {{canvasDisplayWidth}}px; height: {{canvasDisplayHeight}}px;">
+      </canvas>
+    </scroll-view>
+
+    <!-- 原图对比 -->
+    <view class="compare-toggle" bindtap="toggleCompare">
+      <text>{{showCompare ? '隐藏原图' : '对照原图'}}</text>
+    </view>
+    <image wx:if="{{showCompare && sourceImagePath}}"
+      class="compare-image" src="{{sourceImagePath}}" mode="aspectFit"></image>
+  </view>
+
+  <!-- 操作按钮 -->
+  <view class="action-bar safe-bottom">
+    <view class="action-btn save-btn" bindtap="saveTemplate">
+      <text class="action-icon">💾</text>
+      <text>保存图片</text>
+    </view>
+    <view class="action-btn share-btn" bindtap="shareTemplate">
+      <text class="action-icon">📤</text>
+      <text>分享</text>
+    </view>
+  </view>
+
+  <!-- 材料清单 -->
+  <material-list
+    materials="{{materialList}}"
+    totalBeads="{{totalBeads}}"
+    physicalSize="{{physicalSize}}"
+    showCopy="{{true}}"
+    cols="{{cols}}"
+    rows="{{rows}}"
+    colorCount="{{colorCount}}"
+  />
+
+  <!-- 拼豆小贴士 -->
+  <view class="card tips-card">
+    <view class="section-title">拼制小贴士</view>
+    <view class="tip-list">
+      <view class="tip-item">
+        <text class="tip-icon">💡</text>
+        <text class="tip-text">建议按行从左到右、从上到下依次拼制</text>
+      </view>
+      <view class="tip-item">
+        <text class="tip-icon">💡</text>
+        <text class="tip-text">相同颜色区域可以批量拼，提高效率</text>
+      </view>
+      <view class="tip-item">
+        <text class="tip-icon">💡</text>
+        <text class="tip-text">每5行有粗分隔线，方便计数定位</text>
+      </view>
+      <view class="tip-item">
+        <text class="tip-icon">💡</text>
+        <text class="tip-text">建议多买10%的拼豆作为备用</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- 高清导出用隐藏 Canvas（宽高不能太小，否则部分机型导出失败）-->
+  <canvas type="2d" id="export-canvas"
+    style="position:fixed;left:-9999rpx;top:-9999rpx;width:300px;height:300px;opacity:0;pointer-events:none;">
+  </canvas>
+</view>

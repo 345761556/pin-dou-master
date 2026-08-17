@@ -1,0 +1,41 @@
+<view class="material-card">
+  <view class="section-title">材料清单</view>
+
+  <!-- 颜色分布图 -->
+  <view class="color-chart">
+    <view class="chart-bar"
+      wx:for="{{materials}}" wx:key="color.id"
+      style="width: {{item.percent}}%; background: {{item.color.hex}};">
+    </view>
+  </view>
+
+  <!-- 材料列表 -->
+  <view class="material-list">
+    <view class="material-header">
+      <text class="col-color">颜色</text>
+      <text class="col-code">编号</text>
+      <text class="col-name">名称</text>
+      <text class="col-count">数量</text>
+      <text class="col-percent">占比</text>
+    </view>
+
+    <view class="material-row" wx:for="{{materials}}" wx:key="color.id">
+      <view class="col-color">
+        <view class="color-dot" style="background: {{item.color.hex}}"></view>
+      </view>
+      <text class="col-code">{{item.color.id}}</text>
+      <text class="col-name">{{item.color.name}}</text>
+      <text class="col-count">{{item.count}}颗</text>
+      <text class="col-percent">{{item.percentText}}</text>
+    </view>
+  </view>
+
+  <!-- 合计 -->
+  <view class="material-total">
+    <text>合计：<text class="total-count">{{totalBeads}}</text> 颗拼豆</text>
+    <text class="total-size">成品尺寸：{{physicalSize}}</text>
+  </view>
+
+  <!-- 复制按钮 -->
+  <view wx:if="{{showCopy}}" class="copy-btn" bindtap="onCopy">复制材料清单</view>
+</view>

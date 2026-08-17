@@ -1,0 +1,62 @@
+<view class="page-gallery">
+  <!-- 顶部统计 -->
+  <view class="stats-bar">
+    <text class="stats-text">共 <text class="highlight">{{historyList.length}}</text> 个模板</text>
+  </view>
+
+  <!-- 历史记录网格 -->
+  <view wx:if="{{historyList.length > 0}}" class="gallery-grid">
+    <view class="gallery-card card" wx:for="{{historyList}}" wx:key="id"
+      bindtap="viewTemplate" data-index="{{index}}">
+      
+      <!-- 模板颜色预览 -->
+      <view class="card-preview">
+        <view class="color-strip">
+          <view class="strip-segment"
+            wx:for="{{item.colorPreview}}" wx:for-item="seg" wx:key="index"
+            style="width: {{seg.percent}}%; background: {{seg.color}};">
+          </view>
+        </view>
+        <view class="card-size-badge">
+          {{item.cols}}×{{item.rows}}
+        </view>
+        <!-- 删除按钮 -->
+        <view class="card-delete-btn" catchtap="deleteTemplate" data-id="{{item.id}}">
+          <text class="card-delete-icon">✕</text>
+        </view>
+      </view>
+
+      <!-- 模板关键信息 -->
+      <view class="card-body">
+        <text class="card-title">{{item.totalBeads}} 颗</text>
+        <view class="card-meta">
+          <text class="card-meta-item">{{item.colorCount}}色</text>
+          <text class="card-meta-divider">·</text>
+          <text class="card-meta-item">{{item.dateLabel}}</text>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <!-- 空状态 -->
+  <view class="empty-state" wx:else>
+    <view class="empty-icon">
+      <view class="icon-bead-grid">
+        <view class="icon-bead" style="background:#FF6B6B"></view>
+        <view class="icon-bead" style="background:#4ECDC4"></view>
+        <view class="icon-bead" style="background:#FFE66D"></view>
+        <view class="icon-bead" style="background:#95E1D3"></view>
+        <view class="icon-bead" style="background:#F38181"></view>
+        <view class="icon-bead" style="background:#AA96DA"></view>
+        <view class="icon-bead" style="background:#FCBAD3"></view>
+        <view class="icon-bead" style="background:#C9E4DE"></view>
+        <view class="icon-bead" style="background:#F6C667"></view>
+      </view>
+    </view>
+    <text class="empty-text">还没有制作过模板</text>
+    <text class="empty-hint">去创作页上传图片开始吧</text>
+    <view class="btn-primary" style="margin-top:40rpx;width:400rpx" bindtap="goCreate">
+      开始创作
+    </view>
+  </view>
+</view>

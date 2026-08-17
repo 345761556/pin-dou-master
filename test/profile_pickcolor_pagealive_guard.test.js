@@ -1,0 +1,137 @@
+// test/profile_pickcolor_pagealive_guard.test.js
+// 回归测试：[4] profile.pickColorAtPoint 缺少页面存活守护
+// 问题：取色是用户点击触发的异步操作（query.exec → ctx.drawImage → img.onload → getImageData → setData）。
+//       若用户在取色动画期间快速切走 profile（tab 页 onHide），img.onload 回调仍会在已隐藏页面上
+//       this.setData，触发「页面已卸载 setData」告警。
+// 修复：onShow 置 this._pageAlive=true、onHide 置 false；query.exec 回调入口与 img.onload 入口均
+//       加 this._pageAlive===false 提前 return，避免在隐藏页 setData（与 index.generateTemplate #5 对齐）。
+// 运行：node test/profile_pickcolor_pagealive_guard.test.js
+const path = require('path');
+const fs = require('fs');
+const Module = require('module');
+
+const PROFILE_MARK = 'pages/profile/profile.js';
+
+// scoped require 拦截：仅 profile.js 引用的 util / secCheck 替换为轻量桩（与 profile_sec_check_compress 同款，确保可加载）
+const fakeUtil = {
+  validateImageFile: async () => true,
+  getTemplateHistory: () => [],
+  compressImageIfNeeded: async (p, max) => ({ tempFilePath: p, width: 100, height: 100 }),
+  getImageInfoWithTimeout: (src) => Promise.resolve({ width: 100, height: 100, type: 'png' }),
+  removeFileIfExists: () => {},
+  CONSTANTS: { DEFAULT_IMAGE_SIZE: 800 }
+};
+const fakeSecCheck = {
+  checkImageByPath: async () => ({ pass: true, suggest: 'pass', skipped: false }),
+  blockMessage: (r, def) => def
+};
+// 取色匹配路径用到的色彩库/豆引擎：用受控桩替换，避免依赖真实色卡数据是否加载
+const fakeColorLib = {
+  getCurrentColors: () => ([{ id: 'C01', name: '白', hex: '#FFFFFF', r: 255, g: 255, b: 255 }])
+};
+const fakeBeadEngine = {
+  initPalette: (colors) => colors,
+  matchToPalette: (r, g, b) => ({ hex: '#0A141E', name: '测试色', id: 'T1', r, g, b }),
+  calcDeltaE: () => 1.0,
+  renderTemplate: () => {}
+};
+const origRequire = Module.prototype.require;
+Module.prototype.require = function (id) {
+  if (id.indexOf('utils/util') !== -1 && this.filename && this.filename.replace(/\\/g, '/').indexOf(PROFILE_MARK) !== -1) return fakeUtil;
+  if (id.indexOf('utils/secCheck') !== -1 && this.filename && this.filename.replace(/\\/g, '/').indexOf(PROFILE_MARK) !== -1) return fakeSecCheck;
+  if (id.indexOf('utils/colorLibrary') !== -1 && this.filename && this.filename.replace(/\\/g, '/').indexOf(PROFILE_MARK) !== -1) return fakeColorLib;
+  if (id.indexOf('utils/beadEngine') !== -1 && this.filename && this.filename.replace(/\\/g, '/').indexOf(PROFILE_MARK) !== -1) return fakeBeadEngine;
+  return origRequire.apply(this, arguments);
+};
+
+// ---- mock 微信环境 ----
+let execCb = null;          // query.exec 回调
+let imgOnload = null;       // imgEl.onload
+const fakeCtx = {
+  fillStyle: '', fillRect() {}, drawImage() {},
+  getImageData: (x, y, w, h) => ({ data: [10, 20, 30, 255] })
+};
+const fakeCanvas = {
+  width: 0, height: 0,
+  getContext: () => fakeCtx,
+  createImage: () => {
+    const img = {};
+    Object.defineProperty(img, 'onload', { set: (fn) => { imgOnload = fn; }, get: () => imgOnload });
+    Object.defineProperty(img, 'onerror', { set: () => {}, get: () => null });
+    Object.defineProperty(img, 'src', { set: () => {}, get: () => '' });
+    return img;
+  }
+};
+global.getApp = () => ({ globalData: {} });
+global.wx = {
+  env: { USER_DATA_PATH: 'wxfile://usr' },
+  createSelectorQuery: () => ({
+    select: () => ({ boundingClientRect: () => ({}), fields: () => ({}) }),
+    exec: (cb) => { execCb = cb; }
+  }),
+  showToast: () => {}, showModal: () => {},
+  getFileSystemManager: () => ({ copyFileSync: () => {}, accessSync: () => {} })
+};
+
+let pageObj = null;
+global.Page = (o) => { pageObj = o; };
+require('../pages/profile/profile.js');
+
+function makeCtx(init) {
+  const ctx = Object.assign({}, pageObj, {
+    data: Object.assign({ pickerImagePath: 'wxfile://tmp/pick.png', pickerImageInfo: { width: 100, height: 100 }, pickerHistory: [] }, init || {}),
+    setData: (d) => Object.assign(ctx.data, d)
+  });
+  return ctx;
+}
+
+let passed = 0, failed = 0;
+function ok(name, cond) {
+  if (cond) { passed++; console.log('PASS | ' + name); }
+  else { failed++; console.log('FAIL | ' + name); }
+}
+
+// ---- 静态断言 ----
+const profSrc = fs.readFileSync(path.join(__dirname, '..', 'pages', 'profile', 'profile.js'), 'utf8');
+ok('onShow 中置 this._pageAlive = true', /onShow\(\)\s*\{[^}]*this\._pageAlive\s*=\s*true/.test(profSrc));
+ok('onHide 中置 this._pageAlive = false', /onHide\(\)\s*\{[^}]*this\._pageAlive\s*=\s*false/.test(profSrc));
+ok('pickColorAtPoint 的 query.exec 回调入口有 _pageAlive 守护',
+  /query\.exec\(\(res\)\s*=>\s*\{[\s\S]*?if \(this\._pageAlive === false\) return;/.test(profSrc));
+ok('pickColorAtPoint 的 img.onload 入口有 _pageAlive 守护',
+  /imgEl\.onload\s*=\s*\(\)\s*=>\s*\{[\s\S]*?if \(this\._pageAlive === false\) return;/.test(profSrc));
+
+(async () => {
+  // 场景 A：页面已隐藏（onHide 置 _pageAlive=false）→ exec 回调提前 return，不注册 onload、不 setData
+  {
+    execCb = null; imgOnload = null;
+    const ctx = makeCtx();
+    ctx._pageAlive = false;   // 模拟用户已切走 tab
+    ctx.pickColorAtPoint(50, 50);
+    // pickColorAtPoint 内部触发 query.exec(cb)，我们的 mock 把 cb 存到 execCb
+    execCb([
+      { width: 100, height: 100, left: 0, top: 0 },   // imgRect
+      { node: fakeCanvas }                              // canvasRes
+    ]);
+    ok('场景A：隐藏页时 query.exec 回调提前 return（未注册 img.onload）', imgOnload === null);
+    ok('场景A：隐藏页时未触发 setData（pickedColor 未设置）', ctx.data.pickedColor === undefined);
+  }
+
+  // 场景 B：页面存活 → 正常取色并 setData
+  {
+    execCb = null; imgOnload = null;
+    const ctx = makeCtx();
+    ctx._pageAlive = true;    // 模拟页面在前台
+    ctx.pickColorAtPoint(50, 50);
+    execCb([
+      { width: 100, height: 100, left: 0, top: 0 },
+      { node: fakeCanvas }
+    ]);
+    // 手动触发 img.onload（模拟图片加载完成）
+    if (typeof imgOnload === 'function') imgOnload();
+    ok('场景B：存活页时注册了 img.onload 并触发取色', typeof imgOnload === 'function');
+    ok('场景B：存活页时成功 setData pickedColor', ctx.data.pickedColor && ctx.data.pickedColor.originalHex === '#0A141E');
+  }
+
+  console.log(`\n${passed} passed, ${failed} failed`);
+  process.exit(failed === 0 ? 0 : 1);
+})();

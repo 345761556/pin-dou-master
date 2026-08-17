@@ -1,0 +1,9 @@
+{
+  "name": "mediaCheckResult",
+  "version": "1.0.0",
+  "description": "接收 mediaCheckAsync 异步检测结果推送（wxa_media_check 事件），写入 sec_check_results 集合",
+  "main": "index.js",
+  "dependencies": {
+    "wx-server-sdk": "^2.6.20"
+  }
+}

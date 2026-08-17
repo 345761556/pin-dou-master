@@ -1,0 +1,26 @@
+# ===== WeChat 小程序：本地/隐私文件 =====
+# 上传私钥所在（当前虽为空，防止日后 DevTools 自动写入私钥后误提交）
+project.private.config.json
+private.*.key
+
+# ===== 本地缓存 / 依赖 =====
+__pycache__/
+*.pyc
+node_modules/
+**/node_modules/
+
+# ===== 备份与构建产物（非源码） =====
+_backup_before_ui_redesign/
+deliverables/
+qa_debug.js
+
+# ===== 工具缓存（非项目代码，含本地 agent 工作记忆） =====
+.workbuddy/
+
+# ===== 编辑器 / 系统 =====
+.DS_Store
+Thumbs.db
+*.log
+
+# ===== 可选：大二进制按需处理 =====
+# images/  当前仅 42K，已保留（小程序图标为构建必需）
