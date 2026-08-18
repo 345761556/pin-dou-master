@@ -51,7 +51,6 @@
     "disableUseStrict": false,
     "useCompilerPlugins": false,
     "condition": false,
-    "swc": false,
     "disableSWC": true
   },
   "compileType": "miniprogram",
