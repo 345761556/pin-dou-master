@@ -59,7 +59,32 @@ node test/gallery_display_clamp.test.js
 
 > 提示：测试用例覆盖渲染自适应、限频原子性、内容安全 fail-closed、画廊展示钳制等关键路径。
 
+## 安全与隐私
+
+### 内容安全链路（mediaCheckAsync 异步机审）
+
+用户上传图片 → 前端压缩（≤800px，见下）→ 云存储中转 → `secCheck` 云函数调微信 `security.mediaCheckAsync`（异步）→ 微信通过 `wxa_media_check` 消息推送结果 → `mediaCheckResult` 云函数写入 `sec_check_results` → 前端轮询读取 `suggest`（pass 放行 / review、risky 拦截）。
+
+- **超时兜底（不悬挂）**：前端提交后以 1s 间隔轮询最多 **20 次（约 20s）**，若回调未到达（网络抖动 / 微信推送丢失 / 未配置 mediaCheckResult）则按 **fail-closed 拦截**并提示「内容安全检测暂不可用，请稍后重试」——检测结果**永远不会处于悬挂状态**，超时即拒绝放行。
+- **fail-closed 语义**：检测链路任何环节未完成（通道不可用 / 超时 / 图片过大 / 限频）一律默认拦截，仅**开发版 develop** 回退放行便于本地调试；体验版 / 正式版强制拦截。
+- **误杀救济**：拦截时按原因区分提示（违规 / 图片过大 / 操作频繁 / 服务不可用），用户可**直接重新选图重试**，本地相册原图不受影响（仅清理本次压缩产生的临时文件）。注：微信内容安全 API 不提供人工申诉通道，误判的唯一救济是更换图片后重试。
+- **前端上传前校验**（`validateImageFile`，选图即校验，非仅靠云端）：文件类型必须为图片、**大小 ≤10MB**、**宽高 ≤6000px**、真实格式（基于文件内容而非扩展名）在白名单内，图片信息读取超时按失败拒绝。
+
+### 限频分层
+
+- **后端**：`secCheck` 云函数按 openid **每小时 100 次**窗口限频（数据库原子条件更新，数据库故障时降级单实例内存兜底并告警）。
+- **前端**：`index.chooseImage` / `profile.uploadPickerImage` / `template.saveTemplate` 均有**忙碌守卫**（连点忽略），避免同一处理链并发重复消耗检测配额。
+
+### 隐私与数据流
+
+- `privacy.json` 已声明全部隐私接口（`chooseMedia` / `chooseAvatar` / `saveImageToPhotosAlbum`）并启用 `__usePrivacyCheck__`。
+- **用户图片上传**：内容安全检测需要临时上传图片到云存储 `sec_check/` 目录，**检测结束后云函数立即删除**该文件（含提交失败分支，隐私设计，测试已断言）；前端异常路径亦有兜底清理。
+- **数据保留周期**：检测结果（`sec_check_results`）仅存 `suggest` / `label` / `errcode` / 时间戳，不含图片本体；检测完成或拦截后图片即删除，无长期留存。
+- **画廊与历史存储**：模板历史、对照原图、头像均存储于**本地**（`wx.storage` 与 `USER_DATA_PATH` 文件系统），不上传云端；用户在画廊可删除单条历史，页面也提供清理入口。
+
 ## 云函数部署
+
+`cloudfunctions/secCheck` 与 `cloudfunctions/mediaCheckResult` 需在**微信开发者工具**中分别「上传并部署：云端安装依赖」。
 
 `cloudfunctions/secCheck` 与 `cloudfunctions/mediaCheckResult` 需在**微信开发者工具**中分别「上传并部署：云端安装依赖」。
 

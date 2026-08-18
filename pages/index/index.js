@@ -201,6 +201,13 @@ Page({
       mediaType: ['image'],
       sourceType: ['album', 'camera'],
       success: async (res) => {
+        // 防止连点「选择图片」触发多个 chooseMedia 异步链并发：首个链处理中
+        // （校验 + 压缩 + secCheck + 透明统计 + setData）时忽略后续触发，避免重复
+        // 消耗 secCheck 检测配额（后端 100 次/h 限频虽兜底，并发链仍会重复计数）
+        // 与对状态的并发写。与 profile.uploadPickerImage _pickerBusy 同款机制。
+        // finally 保证任何路径（成功/异常/拦截）都复位，不会卡死后续选择。
+        if (this._pickerBusy) return;
+        this._pickerBusy = true;
         try {
         const tempFiles = res.tempFiles || [];
         const tempFile = tempFiles[0];
@@ -291,6 +298,8 @@ Page({
           // 顶层包 try-catch：异常时记日志 + 通用 toast，fail-closed 兜底（绝不静默吞错）。
           log.error('[chooseImage] 异步处理异常（兜底未处理拒绝）:', err);
           wx.showToast({ title: '图片处理失败，请重试', icon: 'none' });
+        } finally {
+          this._pickerBusy = false;
         }
       },
       fail: (err) => {
