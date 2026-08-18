@@ -41,6 +41,7 @@ const CONSTANTS = Object.freeze({
 /**
  * 深度冻结对象（递归冻结所有嵌套对象和数组）
  * @param {any} obj - 要冻结的对象
+ * @param {WeakSet} [seen] - 已访问对象集合，用于防御循环引用（避免相互引用时无限递归）；内部递归时自动传入，调用方可省略
  * @returns {any} 冻结后的对象
  */
 function deepFreeze(obj, seen) {
@@ -77,7 +78,9 @@ const BEAD_PREFS_SCHEMA = {
 const BEAD_PREFS_DEFAULTS = {
   beadSize: CONSTANTS.BEAD_SIZE.DEFAULT,
   beadType: CONSTANTS.BEAD_TYPE.DEFAULT,
-  colorCount: 30,
+  // 单一真源：默认颜色数量引用 util.js CONSTANTS.DEFAULT_COLOR_COUNT（30），
+  // 避免与 util.js 各自硬编码导致改一处漏另一处的漂移（与 MAX_HISTORY 同款治理）。
+  colorCount: UTIL_CONSTANTS.DEFAULT_COLOR_COUNT,
   useDithering: true,
 };
 
@@ -102,7 +105,6 @@ function safeGetStoragePrefs(key, schema, defaults) {
       return result;
     }
 
-    // 按 schema 逐字段校验
     for (const [field, type] of Object.entries(schema)) {
       if (field in raw) {
         const value = raw[field];
@@ -147,7 +149,6 @@ App({
     this._initPrivacyHandler();
     // 初始化云开发（内容安全检测通道；未开通时静默跳过，生产环境检测模块默认 fail-closed 拦截，仅 develop 本地未部署云函数时 fail-open）
     this._initCloud();
-    // 初始化应用
     this._initSystemInfo();
     // 必须先建色卡库再读偏好：_initPreferences 需校验 selectedPalette 是否为
     // colorLibraries 中真实存在的 key，若顺序颠倒（先读偏好）校验必然失败
@@ -337,7 +338,6 @@ App({
     this.globalData.beadType = [CONSTANTS.BEAD_TYPE.SQUARE, CONSTANTS.BEAD_TYPE.CIRCLE].includes(prefs.beadType)
       ? prefs.beadType : CONSTANTS.BEAD_TYPE.DEFAULT;
 
-    // 读取用户偏好的色卡（字符串类型，简单处理）
     // 校验 key 为 colorLibraries 的真实自有 key：仅"是字符串且非空"不足以防脏数据，
     // 用 hasOwnProperty 而非 `in`（`in` 会命中 Object.prototype 原型链，
     // '__proto__'/'constructor'/'toString' 等会误判为存在），

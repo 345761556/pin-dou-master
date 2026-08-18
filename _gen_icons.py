@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 
 try:
@@ -35,9 +36,27 @@ icons_dir = os.path.join(script_dir, 'images', 'icons')
 
 SIZE = 81
 
+# 图标颜色与 tabBar 文字颜色同源（#18）：从 app.json 的 tabBar.color / selectedColor 读取，
+# 避免主题色改动时图标与文字漂移不一致；app.json 缺失/解析失败时回退到硬编码默认值。
+def _load_tabbar_colors():
+    import json
+    try:
+        with open(os.path.join(script_dir, 'app.json'), 'r', encoding='utf-8') as f:
+            cfg = json.load(f)
+        tab = (cfg or {}).get('tabBar') or {}
+        color = tab.get('color')
+        selected = tab.get('selectedColor')
+        if color and selected:
+            return color, selected
+    except Exception:
+        pass
+    # 兜底：与 app.wxss --primary 同源（#FF6B6B）；若后续改主题色请三处同步
+    return '#999999', '#FF6B6B'
+
+_COLOR_INACTIVE, _COLOR_ACTIVE = _load_tabbar_colors()
 COLORS = {
-    'inactive': '#999999',
-    'active': '#FF6B6B',
+    'inactive': _COLOR_INACTIVE,
+    'active': _COLOR_ACTIVE,
 }
 
 ICONS = [
@@ -51,6 +70,18 @@ ICONS = [
 # ==============================
 
 def hex_to_rgb(h):
+    """将 '#RRGGBB' 颜色串解析为 (r, g, b) 元组。
+
+    防御性校验（#3 审计）：非法格式（非 6 位十六进制、含非 hex 字符、长度不符）
+    直接抛 ValueError 并给出清晰错误，避免 int(_, 16) 裸抛 ValueError/静默截断
+    （如 '#FFF' 会被切片成非法长度、'12345' 会静默解析出错误颜色），
+    防止未来 COLORS 改动或函数被复用（如外部传入主题色）时构建崩溃难以排查。
+    当前 COLORS 为脚本内硬编码合法值，校验不影响正常生成。
+    """
+    if not isinstance(h, str) or not re.fullmatch(r'#[0-9a-fA-F]{6}', h):
+        raise ValueError(
+            '非法颜色格式: %r（应为 #RRGGBB 六位十六进制，如 #FF6B6B）' % (h,)
+        )
     h = h.lstrip('#')
     return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
 
@@ -90,10 +121,10 @@ def draw_create(draw, size, color):
     cy = size // 2
     unit = size / 81  # 以基准尺寸 81 为参考
 
-    # 四个端点圆形
+    # 四个端点圆形（#17：常量计算提到循环外，避免每轮重复乘法）
+    dot_r = 4 * unit
     for dx, dy in [(-14,0),(14,0),(0,-14),(0,14)]:
-        r = 4 * unit
-        draw.ellipse([cx+dx*unit-r, cy+dy*unit-r, cx+dx*unit+r, cy+dy*unit+r], fill=color)
+        draw.ellipse([cx+dx*unit-dot_r, cy+dy*unit-dot_r, cx+dx*unit+dot_r, cy+dy*unit+dot_r], fill=color)
     # 横竖条
     draw.rectangle([cx-14*unit, cy-4*unit, cx+14*unit, cy+4*unit], fill=color)
     draw.rectangle([cx-4*unit, cy-14*unit, cx+4*unit, cy+14*unit], fill=color)
@@ -102,12 +133,16 @@ def draw_create(draw, size, color):
 def draw_gallery(draw, size, color):
     """2x2 网格 - 尺寸自适应"""
     unit = size / 81
+    # #17：常量计算提到循环外，避免每轮重复乘法
+    cell = 14 * unit
+    gap = 20 * unit
+    corner = 3 * unit
 
     for row in range(2):
         for col in range(2):
-            x = (24 + col * 20) * unit
-            y = (24 + row * 20) * unit
-            draw.rounded_rectangle([x, y, x+14*unit, y+14*unit], radius=3*unit, fill=color)
+            x = 24 * unit + col * gap
+            y = 24 * unit + row * gap
+            draw.rounded_rectangle([x, y, x+cell, y+cell], radius=corner, fill=color)
 
 @register_drawer('profile')
 def draw_profile(draw, size, color):
