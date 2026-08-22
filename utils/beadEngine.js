@@ -486,6 +486,9 @@ function generateTemplate(canvas, image, options, onProgress) {
     }
   };
 
+  // R3 修复：白色查找结果在循环外算一次（palette 固定），避免白底大图逐像素重算
+  const paletteWhite = findWhiteColor(palette);
+
   if (useDithering) {
     // Floyd-Steinberg 误差扩散抖动算法
     //
@@ -543,6 +546,20 @@ function generateTemplate(canvas, image, options, onProgress) {
           continue;
         }
 
+        // P3-e 修复：近白像素显式用「完整色卡」找白（与 matchToPalette 近白判定同口径
+        // r>250&&g>250&&b>250）。原实现近白像素经 matchToPalette(matchPalette) 在量化子集
+        // 里找白，图无近白色调时子集里的"最接近白"是浅灰/米色，与下方透明/fillBackgroundWhite
+        // 分支「用完整 palette 找白」的注释声明不一致。近白与背景白统一色号后不参与误差扩散
+        // （与背景白同等待遇，避免把近白像素的量化误差扩散污染主体边缘）。
+        if (r > 250 && g > 250 && b > 250) {
+          template[y][x] = paletteWhite.id;
+          if (!materialStats[paletteWhite.id]) {
+            materialStats[paletteWhite.id] = { count: 0, color: paletteWhite };
+          }
+          materialStats[paletteWhite.id].count++;
+          continue;
+        }
+
         const matched = matchToPalette(r, g, b, matchPalette);
         template[y][x] = matched.id;
 
@@ -595,6 +612,16 @@ function generateTemplate(canvas, image, options, onProgress) {
           } else {
             template[y][x] = null; // 空位哨兵
           }
+          continue;
+        }
+
+        // P3-e 修复：近白像素显式用「完整色卡」找白（口径与抖动分支一致，理由见上）
+        if (r > 250 && g > 250 && b > 250) {
+          template[y][x] = paletteWhite.id;
+          if (!materialStats[paletteWhite.id]) {
+            materialStats[paletteWhite.id] = { count: 0, color: paletteWhite };
+          }
+          materialStats[paletteWhite.id].count++;
           continue;
         }
 

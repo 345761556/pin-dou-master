@@ -200,8 +200,24 @@ App({
   _initPrivacyHandler() {
     if (typeof wx.onNeedPrivacyAuthorization !== 'function') return;
 
-    wx.onNeedPrivacyAuthorization((resolve) => {
-      // 弹出隐私协议弹框，让用户阅读并确认
+    // P2-5 修复：提供《隐私保护指引》文本入口，点击调用 wx.openPrivacyContract 打开协议全文
+    // （微信隐私合规要求——用户在同意前必须有可触达的协议阅读途径）。
+    // 低版本基础库无该 API 时给出升级引导而非静默无响应。
+    const openPrivacyContract = () => {
+      if (typeof wx.openPrivacyContract !== 'function') {
+        wx.showToast({ title: '当前微信版本过低，请升级微信后查看', icon: 'none' });
+        return;
+      }
+      wx.openPrivacyContract({
+        // 打开失败（协议未配置/网络异常等）时给出反馈，避免点击后静默无响应
+        fail: () => {
+          wx.showToast({ title: '隐私协议打开失败，请稍后重试', icon: 'none' });
+        }
+      });
+    };
+
+    // 同意/拒绝主弹窗：拒绝不强制退出（仅阻止当前受限 API，并提示需先同意）
+    const showConsentModal = (resolve) => {
       wx.showModal({
         title: '隐私保护提示',
         content: '在使用选择图片、保存图片等功能前，需要您阅读并同意《隐私协议》。',
@@ -212,8 +228,35 @@ App({
             // 用户同意，通知微信框架继续执行 API
             resolve({ event: 'agree' });
           } else {
-            // 用户拒绝，通知微信框架终止 API 调用
+            // 用户拒绝：保留原逻辑——不强制退出，仅阻止本次受限 API，并提示需先同意
+            wx.showToast({ title: '请先同意隐私授权后继续使用', icon: 'none' });
             resolve({ event: 'disagree' });
+          }
+        },
+        fail: () => {
+          // 弹框失败时默认拒绝，防止非法调用
+          resolve({ event: 'disagree' });
+        }
+      });
+    };
+
+    wx.onNeedPrivacyAuthorization((resolve) => {
+      // 入口弹窗：同时提供「同意」与「查看隐私保护指引」两个可点击按钮。
+      // 点击「查看隐私保护指引」调用 wx.openPrivacyContract 打开协议全文，
+      // 随后再回到同意/拒绝弹窗，确保用户在同意前有可触达的协议阅读途径（审核合规）。
+      wx.showModal({
+        title: '隐私保护提示',
+        content: '在使用选择图片、保存图片等功能前，需要您阅读并同意《隐私协议》。\n\n点击下方「查看隐私保护指引」可阅读协议全文。',
+        confirmText: '同意',
+        cancelText: '查看隐私保护指引',
+        success: (res) => {
+          if (res.confirm) {
+            // 用户同意，通知微信框架继续执行 API
+            resolve({ event: 'agree' });
+          } else {
+            // 点击「查看隐私保护指引」：打开协议全文，随后回到同意/拒绝弹窗
+            openPrivacyContract();
+            showConsentModal(resolve);
           }
         },
         fail: () => {

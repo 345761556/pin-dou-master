@@ -77,7 +77,10 @@ rebuildCloud();
   ok('errcode 45009 回收自己上传的文件', deleteCalls.length === 1 && deleteCalls[0][0] === lastFileID);
   ok('errcode 45009 fail-closed 拦截(pass=false)', r.pass === false);
 
-  // 4) 正常 pass(errcode=0) → 前端不重复删除（云函数 finally 负责清理）
+  // 4) 正常 pass(errcode=0) → 前端兜底删除 1 次（P2-6 修复：删除时机后移）
+  // P2-6 背景：云函数 submit 成功路径不再在 finally 立即删文件（避免与 mediaCheckAsync
+  // 异步下载 media_url 竞态致 -1008 误拦合法图），文件改由 mediaCheckResult 写入结果后
+  // （云函数侧）+ 前端 pollSecCheckResult 结束后（本断言）双层兜底删除，隐私目标不变。
   uploadCalls = []; deleteCalls = []; lastFileID = null;
   // 必须显式把 fnResult 重置为成功对象（submit 返回 errcode 0 才算正常放行链路）；
   // 否则会沿用 case 3 的 45009，误走 errcode≠0 拦截分支，两条断言无意义失败（测试 setup 遗漏）。
@@ -85,7 +88,8 @@ rebuildCloud();
   pollResult = { errcode: 0, errmsg: 'ok', status: 'done', suggest: 'pass' };
   r = await secCheck.checkImageByPath('wxfile://tmp/z.png', { scene: 2 });
   ok('errcode 0 正常放行(pass/skipped=false)', r.pass === true && r.skipped === false);
-  ok('errcode 0 前端不重复删除(避免误删/双删)', deleteCalls.length === 0);
+  ok('errcode 0 前端轮询结束后兜底删除 1 次（P2-6：云函数成功路径已不立即删）',
+    deleteCalls.length === 1 && deleteCalls[0][0] === lastFileID);
   pollResult = null;
 
   console.log(`\n${passed} passed, ${failed} failed`);

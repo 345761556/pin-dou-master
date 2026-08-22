@@ -63,15 +63,37 @@ exports.main = async (event) => {
 
   try {
     const db = cloud.database();
-    await db.collection(RESULT_COLLECTION).doc(traceId).set({
-      data: {
-        suggest,
-        label,
-        errcode: data.errcode != null ? data.errcode : 0,
-        createdAt: Date.now()
-      }
-    });
+    // P2-6 修复：先读取 submit 阶段写入的 pending 文档取回 fileID。下方 set 为覆盖写，
+    // 若不显式合并，fileID 字段将丢失、云存储文件失去唯一归属线索无法兜底删除。
+    let fileID = '';
+    try {
+      const prev = await db.collection(RESULT_COLLECTION).doc(traceId).get().catch(() => ({ data: null }));
+      fileID = (prev && prev.data && typeof prev.data.fileID === 'string') ? prev.data.fileID : '';
+    } catch (e) {
+      // 读取失败仅告警：fileID 置空则跳过兜底删除（前端 pollSecCheckResult 结束后仍有二层兜底）
+      console.warn('[mediaCheckResult] 读取 pending 文档失败，跳过 fileID 合并 trace_id=' + traceId, (e && (e.errMsg || e.message)) || e);
+    }
+    const writeData = {
+      suggest,
+      label,
+      errcode: data.errcode != null ? data.errcode : 0,
+      createdAt: Date.now()
+    };
+    if (fileID) writeData.fileID = fileID; // 保留 fileID（P2-6），供审计与兜底删除追溯
+    await db.collection(RESULT_COLLECTION).doc(traceId).set({ data: writeData });
     console.log('[mediaCheckResult] 已写入结果 trace_id=' + traceId + ' suggest=' + suggest);
+    // P2-6 修复：写入成功后兜底删除云存储中转文件。
+    // 背景：secCheck submit 成功路径已不在 finally 立即删文件（避免与 mediaCheckAsync
+    // 异步下载 media_url 竞态致 -1008 误拦合法图）；此刻检测结果已返回、检测服务器已消费
+    // 完该文件，删除时机安全，且保证「用户图片不残留」的隐私目标不变。
+    // deleteFile 失败仅告警不阻断（结果已落盘，前端轮询结束后另有二层兜底删除）。
+    if (fileID) {
+      try {
+        await cloud.deleteFile({ fileList: [fileID] });
+      } catch (e) {
+        console.warn('[mediaCheckResult] 兜底删除云存储文件失败（不阻断）trace_id=' + traceId, (e && (e.errMsg || e.message)) || e);
+      }
+    }
     return { errcode: 0, errmsg: 'ok' };
   } catch (e) {
     // 集合未创建时报错 → 引导创建（仅服务端日志，不向微信推送方透传细节）

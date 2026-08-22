@@ -110,11 +110,13 @@ Page({
     const safeMaterialList = Array.isArray(templateData.materialList) ? templateData.materialList : [];
     const materialList = safeMaterialList.map(item => {
       const safeCount = clampDisplayNumber(item.count, 20000);
+      // P3-a 修复：percent 语义恒 ≤100%，包 Math.min 封顶与 gallery.js 同口径
+      // （脏 totalBeads 偏小时 calcPercent 可算出 >100%，避免色条/文案越界）
       return {
         ...item,
         count: safeCount,
-        percent: calcPercent(safeCount, templateData.totalBeads),
-        percentText: calcPercent(safeCount, templateData.totalBeads, 1) + '%'
+        percent: Math.min(100, calcPercent(safeCount, templateData.totalBeads)),
+        percentText: Math.min(100, calcPercent(safeCount, templateData.totalBeads, 1)) + '%'
       };
     });
 
@@ -377,8 +379,10 @@ Page({
   },
 
   // 统一导出：逐级尝试不同 cellSize，返回 Promise<tempFilePath>
-  // 注意：cellSize 越小 → 每个格子像素越少 → Canvas 尺寸越小
-  // 所以 candidates 从小到大尝试是正确的（大模板从 cellSize=5 开始）
+  // P3-b 修正：原注释「candidates 从小到大尝试（大模板从 cellSize=5 开始）」与实现矛盾。
+  // 实际 EXPORT_CELL_CANDIDATES=[50…8] 从大到小排列——cellSize 越大清晰度越高，优先尝试
+  // 最大候选以获得最高清晰度；超出 Canvas 维度上限 / 位图内存预算的候选被跳过后逐级降级
+  // 到更小 cellSize，直至找到首个可成功导出的候选。
   // 扁平化：for-of 遍历候选 + try/catch 捕获单个候选失败，首个成功即返回
   async _generateExportImage({ candidates, logPrefix, failMsg }) {
     // 页面已销毁（onUnload 置 _destroyed）则立即中止：避免对已 detach 的 canvas node

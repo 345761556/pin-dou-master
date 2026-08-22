@@ -243,7 +243,16 @@ Page({
         // 内容安全检测（微信审核要求：用户可上传图片的场景必须接入内容安全检测 mediaCheckAsync，
         // 检测不通过时提示「所发布内容含违规信息」即可）。
         // 场景 scene=4（社交日志，用户创作内容）；通道不可用时内部降级放行。
-        const secResult = await secCheck.checkImageByPath(processed.tempFilePath, { scene: 4 });
+        // P2-3 修复：检测链路含云存储上传 + 异步轮询，耗时数秒，加 loading 遮罩防止用户
+        // 误以为无响应而重复选图；show/hide 紧贴 secCheck 调用对，拦截 return 路径也已关闭遮罩。
+        if (typeof wx.showLoading === 'function') wx.showLoading({ title: '安全检测中...', mask: true });
+        // R2 修复：检测意外 reject 时也必须关闭遮罩，否则 mask:true 全屏 loading 永久卡死页面
+        let secResult;
+        try {
+          secResult = await secCheck.checkImageByPath(processed.tempFilePath, { scene: 4 });
+        } finally {
+          if (typeof wx.hideLoading === 'function') wx.hideLoading();
+        }
         if (!secResult.pass) {
           // 仅提示违规，不向用户暴露检测细节（与 P2-1 错误信息收敛原则一致）。
           // 拦截原因非违规（过大/限频/服务暂不可用）时由 blockMessage 给出差异化文案。
@@ -386,13 +395,19 @@ Page({
           img.onload = () => {
             if (this._pageAlive === false) { done(0); return; }
             try {
-              // 透明占比是图像内容属性，与最终网格分辨率近似无关；
-              // 直接按图片自然尺寸绘制统计，无需按 templateCols 重采样。
-              canvas.width = img.width;
-              canvas.height = img.height;
-              ctx.clearRect(0, 0, img.width, img.height);
-              ctx.drawImage(img, 0, 0, img.width, img.height);
-              const { data } = ctx.getImageData(0, 0, img.width, img.height);
+              // P1-2 修复：画布尺寸钳制到 ≤1024px（与 profile.pickColorAtPoint 的
+              // PICKER_MAX_SIDE=1024 同源同口径）。压缩失败回退原图时 img.width/height
+              // 可达 6000²，按自然尺寸建画布需约 6000×6000×4B ≈ 144MB 内存，低端机极易 OOM。
+              // 透明占比是尺度不变量（缩放统计不改变透明像素比例），故缩放后统计结果一致。
+              const MEASURE_MAX_SIDE = 1024;
+              const scale = Math.min(1, MEASURE_MAX_SIDE / img.width, MEASURE_MAX_SIDE / img.height);
+              const measureW = Math.max(1, Math.round(img.width * scale));
+              const measureH = Math.max(1, Math.round(img.height * scale));
+              canvas.width = measureW;
+              canvas.height = measureH;
+              ctx.clearRect(0, 0, measureW, measureH);
+              ctx.drawImage(img, 0, 0, measureW, measureH);
+              const { data } = ctx.getImageData(0, 0, measureW, measureH);
               const total = data.length / 4;
               let transparent = 0;
               for (let i = 3; i < data.length; i += 4) {

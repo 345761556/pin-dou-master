@@ -123,6 +123,10 @@ rebuildCloud();
     callDataLog.length >= 2 && callDataLog[0].action === 'submit' && callDataLog[1].action === 'query');
   ok('submit 携带 fileID 与 scene', callDataLog[0].fileID === 'cloud://env-test/xxx' && callDataLog[0].scene === 4);
   ok('query 携带 trace_id', callDataLog[1].traceId === 'trace-test-001');
+  // P2-6 修复：submit 成功路径云函数不再立即删文件，前端轮询结束后兜底删除 1 次
+  //（原「云函数 finally 统一删除」改为「mediaCheckResult 写结果后 + 前端轮询后」双层兜底）
+  ok('pass 路径前端兜底删除云存储文件（P2-6 删除时机后移）',
+    deleteCalls.length === 1 && deleteCalls[0][0] === 'cloud://env-test/xxx');
 
   // 2) risky → 拦截（违规）
   pollResult = defaultPollResult('risky');
@@ -164,7 +168,9 @@ rebuildCloud();
   r = await secCheck.checkImageByPath('wxfile://tmp_abc.png');
   ok('云函数失败 fail-closed 拦截（pass=false）', r.pass === false);
   eq('云函数失败 blockType=error', r.blockType, 'error');
-  ok('云函数失败 兜底删除已上传文件', deleteCalls.length === 1 && deleteCalls[0][0] === 'cloud://env-test/xxx');
+  ok('云函数失败 兜底删除已上传文件', deleteCalls.length === 4 && deleteCalls[3][0] === 'cloud://env-test/xxx');
+  // 注：P2-6 后前端在「轮询结束」统一兜底删除——累计 4 = 用例1(pass)/2(risky)/3(review)
+  // 的轮询后兜底删 + 本用例 catch 兜底删；fileID 均为同一 mock 固定值
   fnError = null;
 
   // 8) 云函数 submit 返回非 0 errcode → fail-closed 拦截 + 仍回收已上传文件
@@ -173,13 +179,15 @@ rebuildCloud();
   r = await secCheck.checkImageByPath('wxfile://tmp_abc.png');
   ok('errcode -6 fail-closed 拦截（pass=false）', r.pass === false);
   eq('errcode -6 blockType=rate', r.blockType, 'rate');
-  ok('errcode -6 仍回收已上传文件', deleteCalls.length === 2);
+  ok('errcode -6 仍回收已上传文件', deleteCalls.length === 5);
+  // 注：累计 5 = 用例1/2/3（轮询后兜底）+ 用例7（catch 兜底）+ 本用例（errcode≠0 回收）
   // 8b) 配额 45009 → blockType=error
   fnResult = { errcode: 45009, errmsg: 'reach max api daily quota limit' };
   r = await secCheck.checkImageByPath('wxfile://tmp_abc.png');
   ok('errcode 45009 fail-closed 拦截（pass=false）', r.pass === false);
   eq('errcode 45009 blockType=error', r.blockType, 'error');
-  ok('errcode 45009 仍回收已上传文件', deleteCalls.length === 3);
+  ok('errcode 45009 仍回收已上传文件', deleteCalls.length === 6);
+  // 注：累计 6 = 用例1/2/3 + 用例7 + 用例8a + 本用例（均为前端兜底/回收删除）
   fnResult = null;
 
   // 8c) 轮询超时（query 一直 pending）→ fail-closed 拦截

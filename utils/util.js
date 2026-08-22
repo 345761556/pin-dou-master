@@ -193,7 +193,10 @@ function saveImageToAlbum(filePath) {
                 } else {
                   reject(new Error('user_cancel'));
                 }
-              }
+              },
+              // 健壮性：showModal 失败（基础库异常等）也必须终结 Promise，
+              // 否则 await saveImageToAlbum 永久悬挂、loading 遮罩残留到页面卸载
+              fail: function() { reject(new Error('modal_failed')); }
             });
           } else {
             // 已授权或未决定，直接保存（系统会弹出权限框）

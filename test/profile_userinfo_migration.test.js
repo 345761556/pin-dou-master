@@ -80,8 +80,8 @@ await test('chooseAvatar + 昵称 → saveProfile 仅持久化 {nickName,avatarU
   capturedPage.onNicknameInput({ detail: { value: '豆豆' } });
   assert.strictEqual(capturedPage.data.editNickName, '豆豆');
 
-  // 保存
-  capturedPage.saveProfile();
+  // 保存（saveProfile 已 async：需 await 内容安全检测 checkText 完成后再断言）
+  await capturedPage.saveProfile();
   const saved = stored['userInfo_safe'];
   assert.ok(saved, 'userInfo_safe 应被写入');
   assert.strictEqual(saved.nickName, '豆豆');
@@ -90,11 +90,11 @@ await test('chooseAvatar + 昵称 → saveProfile 仅持久化 {nickName,avatarU
   assert.ok(!('gender' in saved) && !('country' in saved), '不应持久化完整 userInfo 对象（仅必要字段）');
 });
 
-await test('昵称/头像均空时 saveProfile 拦截', () => {
+await test('昵称/头像均空时 saveProfile 拦截', async () => {
   stored = {};
   capturedPage.onLoad();
   capturedPage.setData({ editAvatarUrl: '', editNickName: '' });
-  capturedPage.saveProfile();
+  await capturedPage.saveProfile();
   // 注意：代码中 nickName 空值兜底为 '拼豆爱好者'，故不会完全为空，
   // 但 avatarUrl 为空且无其他字段时应提示（此处因 nickName 兜底不拦截）。
   // 实际行为：保存成功（带兜底昵称），而非拦截。

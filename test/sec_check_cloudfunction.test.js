@@ -183,7 +183,13 @@ ok('媒体安全接口守卫：mediaCheckAsync 调用前做 typeof 判型（旧�
   downloadCalls = []; deleteCalls = []; secCheckArgs = []; dbRows = []; currentOpenid = 'userB';
   r = await secCheckMain({ type: 'image', scene: 2, fileID: 'cloud://env-test/sec_check/1700000000000_ab12cd34.png' });
   ok('合法 sec_check/ 前缀 → 返回 errcode 0 + trace_id', r && r.errcode === 0 && r.trace_id === 'trace-test-001');
-  ok('合法 sec_check/ 前缀 → 提交后仍触发 deleteFile（清理本文件）', deleteCalls.length === 1);
+  // P2-6 修复：submit 成功路径不再立即删文件（避免与 mediaCheckAsync 异步下载 media_url 竞态
+  // 致 -1008 误拦合法图）；文件改由 mediaCheckResult 写入结果后 + 前端轮询结束后双层兜底删除
+  ok('P2-6: 合法提交成功路径不立即 deleteFile（删除时机后移至结果回写后）', deleteCalls.length === 0);
+  // P2-6 修复：submit 成功后写入 pending 文档并携带 fileID（供 mediaCheckResult 兜底删除取回）
+  const pendingDoc = dbRows.find((row) => row._id === 'trace-test-001');
+  ok('P2-6: submit 成功写入 pending 文档（status=pending + fileID）',
+    !!pendingDoc && pendingDoc.status === 'pending' && pendingDoc.fileID === 'cloud://env-test/sec_check/1700000000000_ab12cd34.png');
   // R6 修复：mediaCheckAsync 入参（图片正确接口；msgSecCheck 是文本接口，传图片必 47001）
   ok('mediaCheckAsync 入参 media_type === 2（数字图片枚举）',
     secCheckArgs.length === 1 && secCheckArgs[0].media_type === 2);

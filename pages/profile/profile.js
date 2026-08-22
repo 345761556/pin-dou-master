@@ -130,7 +130,16 @@ Page({
     const checkPath = await this._compressForSecCheck(tempPath);
 
     // 内容安全检测（通道不可用时内部降级放行）
-    const secResult = await secCheck.checkImageByPath(checkPath, { scene: 1 });
+    // P2-3 修复：检测链路含云存储上传 + 异步轮询，耗时数秒，加 loading 遮罩防止用户
+    // 误以为无响应而重复操作；show/hide 紧贴 secCheck 调用对，保证拦截 return 路径也已关闭遮罩。
+    if (typeof wx.showLoading === 'function') wx.showLoading({ title: '安全检测中...', mask: true });
+    // R2 修复：检测意外 reject 时也必须关闭遮罩（mask:true 卡死防护）
+    let secResult;
+    try {
+      secResult = await secCheck.checkImageByPath(checkPath, { scene: 1 });
+    } finally {
+      if (typeof wx.hideLoading === 'function') wx.hideLoading();
+    }
     if (!secResult.pass) {
       // 拦截原因非违规（过大/限频/服务暂不可用）时由 blockMessage 给出差异化文案
       wx.showToast({ title: secCheck.blockMessage(secResult, '头像含违规信息，请更换后重试'), icon: 'none' });
@@ -197,23 +206,40 @@ Page({
   },
 
   // 保存资料（仅存储必要字段，避免完整 userInfo 对象泄露）
-  saveProfile() {
-    // L2 修复：nickName 截断到 20 字符，避免脏数据写入；默认兜底保持原语义
-    const nickName = ((this.data.editNickName || '').trim() || '拼豆爱好者').slice(0, 20);
-    const avatarUrl = this.data.editAvatarUrl || '';
-    // 说明：nickName 经 ((editNickName||'').trim() || '拼豆爱好者').slice(0,20) 计算，恒为 truthy
-    // （最小也为默认昵称）。原「!nickName && !avatarUrl」守卫的 !nickName 永为假、该守卫永不可达，
-    // 属死代码——已移除，避免「写了不生效」的误导。默认昵称即「至少含昵称」语义，保存始终可继续。
-    const safeInfo = { nickName, avatarUrl };
-    this.setData({
-      hasUserInfo: true,
-      userInfo: safeInfo,
-      showProfileEdit: false
-    });
-    try { wx.setStorageSync('userInfo_safe', safeInfo); } catch (e) { log.warn('保存 userInfo 持久化失败:', e); }
-    // 清理旧版完整数据（如有）
-    try { wx.removeStorageSync('userInfo'); } catch (err) {}
-    wx.showToast({ title: '已保存', icon: 'success' });
+  // P1-1 修复：改为 async——昵称属用户可编辑文本（UGC），保存前须过内容安全检测
+  // （msgSecCheck）。bindtap 支持 async 函数，异步化不影响 wxml 调用。
+  async saveProfile() {
+    // R5 修复：防重入守卫——检测/保存耗时期间重复点「保存」会并发触发多次 secCheck 与写 storage，
+    // 用 _savingBusy 标志 + finally 统一复位（含 secResult 不通过等 return 路径）。
+    if (this._savingBusy) return;
+    this._savingBusy = true;
+    try {
+      // L2 修复：nickName 截断到 20 字符，避免脏数据写入；默认兜底保持原语义
+      const nickName = ((this.data.editNickName || '').trim() || '拼豆爱好者').slice(0, 20);
+      const avatarUrl = this.data.editAvatarUrl || '';
+      // P1-1 修复：昵称内容安全检测（fail-closed 与图片链路同口径）。
+      // 不通过则仅提示并 return：不写 storage、不关弹窗，用户可直接修改后重试。
+      const secResult = await secCheck.checkText(nickName);
+      if (!secResult.pass) {
+        wx.showToast({ title: secCheck.blockMessage(secResult, '昵称含违规信息，请修改'), icon: 'none' });
+        return;
+      }
+      // 说明：nickName 经 ((editNickName||'').trim() || '拼豆爱好者').slice(0,20) 计算，恒为 truthy
+      // （最小也为默认昵称）。原「!nickName && !avatarUrl」守卫的 !nickName 永为假、该守卫永不可达，
+      // 属死代码——已移除，避免「写了不生效」的误导。默认昵称即「至少含昵称」语义，保存始终可继续。
+      const safeInfo = { nickName, avatarUrl };
+      this.setData({
+        hasUserInfo: true,
+        userInfo: safeInfo,
+        showProfileEdit: false
+      });
+      try { wx.setStorageSync('userInfo_safe', safeInfo); } catch (e) { log.warn('保存 userInfo 持久化失败:', e); }
+      // 清理旧版完整数据（如有）
+      try { wx.removeStorageSync('userInfo'); } catch (err) {}
+      wx.showToast({ title: '已保存', icon: 'success' });
+    } finally {
+      this._savingBusy = false;
+    }
   },
 
   // 跳转作品页
@@ -315,7 +341,15 @@ Page({
         const checkPath = await this._compressForSecCheck(tempFilePath);
 
         // 内容安全检测（scene=2 评论/互动；通道不可用时内部降级放行）
-        const secResult = await secCheck.checkImageByPath(checkPath, { scene: 2 });
+        // P2-3 修复：加 loading 遮罩（同 onChooseAvatar 口径），show/hide 紧贴检测调用对
+    if (typeof wx.showLoading === 'function') wx.showLoading({ title: '安全检测中...', mask: true });
+    // R2 修复：检测意外 reject 时也必须关闭遮罩（mask:true 卡死防护）
+    let secResult;
+    try {
+      secResult = await secCheck.checkImageByPath(checkPath, { scene: 2 });
+    } finally {
+      if (typeof wx.hideLoading === 'function') wx.hideLoading();
+    }
         if (!secResult.pass) {
           // 拦截原因非违规（过大/限频/服务暂不可用）时由 blockMessage 给出差异化文案
           wx.showToast({ title: secCheck.blockMessage(secResult, '图片内容含违规信息，请更换后重试'), icon: 'none' });
@@ -638,8 +672,29 @@ Page({
     wx.showModal({
       title: '关于拼豆大师',
       content: '拼豆大师是一款图片转拼豆模板的工具小程序。\n\n上传任意图片，自动转换拼豆模板图、材料清单和成品尺寸。\n\n支持多种拼豆规格和颜色数量自定义，让拼豆创作更简单！\n\n版本: v1.0.0',
-      showCancel: false,
-      confirmText: '好的'
+      // P2-5 修复：左侧按钮作为《隐私协议》查看入口（showModal 的 cancelText ≤4 字符，
+      // 「隐私协议」恰好合规；无需改动 wxml/wxss，最小侵入）。确认按钮保持原「好的」。
+      cancelText: '隐私协议',
+      confirmText: '好的',
+      success: (res) => {
+        if (res.cancel) this.showPrivacyContract();
+      }
+    });
+  },
+
+  // 查看《隐私协议》
+  // P2-5 修复：全项目原先无 wx.openPrivacyContract 调用，用户在同意前无协议阅读途径。
+  // 该 API 需基础库 ≥ 2.32.3，低版本无此方法，typeof 守卫后给出升级引导而非抛错。
+  showPrivacyContract() {
+    if (typeof wx.openPrivacyContract !== 'function') {
+      wx.showToast({ title: '当前微信版本过低，请升级微信后查看', icon: 'none' });
+      return;
+    }
+    wx.openPrivacyContract({
+      // 打开失败（协议未配置/网络异常等）时给出反馈，避免点击后静默无响应
+      fail: () => {
+        wx.showToast({ title: '隐私协议打开失败，请稍后重试', icon: 'none' });
+      }
     });
   }
 });

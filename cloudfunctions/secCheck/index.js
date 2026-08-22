@@ -90,11 +90,20 @@ const RATE_LIMIT_WINDOW_MS = 3600 * 1000; // 1 小时窗口
 const RATE_LIMIT_MAX = 100;               // 每 openid 每窗口最大调用次数
 const RATE_LIMIT_COLLECTION = 'sec_check_rate';
 
+// P2-6 修复：query（轮询）分支独立限频参数。前端每秒轮询一次、最长 20 次，单次检测的合法
+// 轮询消耗远高于 submit，故上限放宽到 600/h；但必须独立于 submit 配额——原实现 query 分支
+// 在 OPENID 校验与限频之前直接 return，可被匿名/恶意刷调用量（免费读额度被打爆）。
+// 独立字段 qWindowStart/qCount 与 submit 的 windowStart/count 互不占用、互不重置。
+const QUERY_RATE_LIMIT_MAX = 600;
+
 // 内存兜底：仅作为「数据库整体不可用（未建集合/权限/网络）」时的降级层，
 // 单实例内 JS 单线程天然原子，但跨实例无一致性——此不精确代价被接受（见 S3 修复结论）。
 const _memRateStore = new Map();
+// P2-6 修复：query 分支独立的内存兜底存储与降级告警去重标记（与 submit 限频互不干扰）
+const _memQueryRateStore = new Map();
 let _rateDegradeLogged = false; // B21：限频降级告警去重，每个实例冷启动只打印一次完整错误（避免持续故障期日志风暴）
 let _rateWasDegraded = false;   // n4：记录是否曾降级为内存兜底；DB 恢复时据此外部打印「降级已解除」事件（消除恢复后无感知盲区）
+let _queryRateDegradeLogged = false; // P2-6：query 限频降级告警去重（同 B21 口径）
 
 /**
  * 按 openid 的窗口限频检查（数据库优先·原子更新；内存仅作数据库故障降级）。
@@ -224,6 +233,99 @@ async function checkRateLimit(openid) {
 }
 
 /**
+ * P2-6 修复：query（轮询）分支独立限频检查。
+ * 复用 checkRateLimit 的「数据库端原子条件更新」模式（S3 修复同款，杜绝 TOCTOU 并发突破），
+ * 但在同一文档（_id=openid）上使用独立字段 qWindowStart/qCount，上限 600/h：
+ *   - 独立于 submit 的 count/windowStart，query 轮询不占用、也不会重置 submit 的 100/h 额度；
+ *   - 数据库不可用时降级为独立内存 Map（memoryQueryRateLimit，同 memoryRateLimit 口径）。
+ * ⚠️ 已知边界（可接受）：文档不存在时的 doc(openid).set 创建在真实 TCB 侧为整文档覆盖写，
+ * 与「并发首访的 submit 创建」竞态时可能覆盖掉 submit 的 count/windowStart（submit 配额被
+ * 重置一次）。该竞态要求「同一 openid 的首次 submit 与首次 query 几乎同时且文档尚不存在」，
+ * 概率极低且后果仅是配额略微放宽（无安全风险），与 checkRateLimit 首访 set 的既有决策一致。
+ * @param {string} openid - 当前用户 openid（来自云调用上下文）
+ * @returns {Promise<{allowed: boolean, source?: string, reason?: string}>}
+ */
+async function checkQueryRateLimit(openid) {
+  const now = Date.now();
+  try {
+    const db = cloud.database();
+    const _ = db.command;
+    const coll = db.collection(RATE_LIMIT_COLLECTION);
+    const windowStart = Math.floor(now / RATE_LIMIT_WINDOW_MS) * RATE_LIMIT_WINDOW_MS;
+
+    // 1) 窗口内原子累加（独立字段 qCount/qWindowStart）：updated===1 即放行
+    const incRes = await coll.where({
+      _id: openid,
+      qWindowStart: windowStart,
+      qCount: _.lt(QUERY_RATE_LIMIT_MAX)
+    }).update({ data: { qCount: _.inc(1), _updatedAt: now } });
+    if (incRes.updated === 1) {
+      return { allowed: true, source: 'db' };
+    }
+
+    // 2) updated===0：文档不存在 / q 窗口已过期 / q 已达上限。读取以区分。
+    const doc = await coll.doc(openid).get().catch(() => ({ data: null }));
+    const d = doc && doc.data;
+    if (!d) {
+      // 首次访问：原子创建（仅写 query 字段，不触碰 submit 字段）
+      await coll.doc(openid).set({
+        data: { _id: openid, openid, qWindowStart: windowStart, qCount: 1, _updatedAt: now }
+      });
+      return { allowed: true, source: 'db' };
+    }
+    if (d.qWindowStart !== windowStart) {
+      // q 窗口过期（含文档由 submit 创建、q 字段尚为 undefined 的情形）：原子重置
+      const resetRes = await coll.where({
+        _id: openid,
+        qWindowStart: _.neq(windowStart)
+      }).update({ data: { qWindowStart: windowStart, qCount: 1, _updatedAt: now } });
+      if (resetRes.updated === 1) {
+        return { allowed: true, source: 'db' };
+      }
+      // 重置被抢占：重试窗口内累加以正确纳入计数
+    }
+
+    // 3) 同窗口 / 重置被抢占：重试原子累加（覆盖瞬时边界），仍不满足则超限
+    const retryRes = await coll.where({
+      _id: openid,
+      qWindowStart: windowStart,
+      qCount: _.lt(QUERY_RATE_LIMIT_MAX)
+    }).update({ data: { qCount: _.inc(1), _updatedAt: now } });
+    return retryRes.updated === 1
+      ? { allowed: true, source: 'db' }
+      : { allowed: false, reason: 'rate', source: 'db' };
+  } catch (e) {
+    // 数据库不可用：降级独立内存兜底（同 B21 口径，每实例冷启动仅告警一次）
+    if (!_queryRateDegradeLogged) {
+      _queryRateDegradeLogged = true;
+      console.error('[secCheck] query 限频数据库不可用，已降级为单实例内存兜底（跨实例不精确，请检查 sec_check_rate 集合是否存在/权限是否正确）:', (e && (e.errMsg || e.message)) || e);
+    }
+    return memoryQueryRateLimit(openid, now);
+  }
+}
+
+/**
+ * P2-6 修复：query 分支的内存兜底限频（仅数据库整体不可用时使用）。
+ * 语义与 memoryRateLimit 一致（首请求锚点滑动窗口、单实例内原子、跨实例不精确可接受），
+ * 使用独立 Map，与 submit 限频互不干扰。
+ * @param {string} openid
+ * @param {number} now
+ */
+function memoryQueryRateLimit(openid, now) {
+  const rec = _memQueryRateStore.get(openid);
+  if (!rec || (now - rec.windowStart) > RATE_LIMIT_WINDOW_MS) {
+    _memQueryRateStore.set(openid, { windowStart: now, count: 1 });
+    return { allowed: true, source: 'memory' };
+  }
+  const newCount = (rec.count || 0) + 1;
+  if (newCount > QUERY_RATE_LIMIT_MAX) {
+    return { allowed: false, reason: 'rate', source: 'memory' };
+  }
+  _memQueryRateStore.set(openid, { windowStart: rec.windowStart, count: newCount });
+  return { allowed: true, source: 'memory' };
+}
+
+/**
  * 内存兜底限频（仅数据库整体不可用时使用）。
  * 单实例内 JS 单线程天然原子；跨实例无共享，统计不精确——S3 修复结论明确接受此代价（仅降级层）。
  * 窗口语义差异（维护者注意）：本函数使用「以首次请求为锚点的滑动窗口」(windowStart=now)，
@@ -278,6 +380,20 @@ exports.main = async (event) => {
     if (!traceId || typeof traceId !== 'string') {
       return { errcode: -9, errmsg: 'invalid traceId' };
     }
+    // P2-6 修复：OPENID 判空与 submit 同口径（-7）——原实现 query 分支在校验之前直接 return，
+    // 匿名调用（模拟器未登录/伪造请求）可无限刷读数据库调用量
+    const queryCtx = cloud.getWXContext();
+    if (!queryCtx || !queryCtx.OPENID) {
+      console.error('[secCheck] query OPENID 为空（开发者工具模拟器未登录/环境未关联？），拒绝服务');
+      return { errcode: -7, errmsg: 'missing openid' };
+    }
+    // P2-6 修复：query 独立限频（600/h，独立字段 qCount，不占用 submit 的 100/h 额度）。
+    // 超限返回 -6：前端 pollSecCheckResult 对非 0 errcode 仅继续轮询直至超时 fail-closed，
+    // 属可自愈的瞬时限流，无需前端特殊处理。
+    const queryRate = await checkQueryRateLimit(queryCtx.OPENID);
+    if (!queryRate.allowed) {
+      return { errcode: -6, errmsg: 'rate limited' };
+    }
     try {
       const db = cloud.database();
       const res = await db.collection('sec_check_results').doc(traceId).get().catch(() => ({ data: null }));
@@ -289,6 +405,62 @@ exports.main = async (event) => {
     } catch (e) {
       console.error('[secCheck] query result failed:', (e && (e.errMsg || e.message)) || e);
       return { errcode: -10, errmsg: 'query failed' };
+    }
+  }
+
+  // action=text：文本内容安全检测（P1-1 修复：昵称等 UGC 文本接入 msgSecCheck v2 同步接口）
+  if (action === 'text') {
+    const content = data.content;
+    // 参数校验：非空字符串；长度 ≤50（昵称输入上限口径），超长拒绝（不静默截断，
+    // 让调用方明确感知参数问题），与图片链路的非法入参错误码风格一致
+    if (!content || typeof content !== 'string' || content.trim().length === 0) {
+      return { errcode: -1, errmsg: 'invalid content' };
+    }
+    if (content.length > 50) {
+      return { errcode: -2, errmsg: 'content too long' };
+    }
+    // OPENID 判空：msgSecCheck v2 要求 openid 必填（与 submit 口径一致）
+    const { OPENID } = cloud.getWXContext();
+    if (!OPENID) {
+      console.error('[secCheck] text OPENID 为空（开发者工具模拟器未登录/环境未关联？）');
+      return { errcode: -7, errmsg: 'missing openid' };
+    }
+    // 过 submit 同款限频：文本检测同样消耗 msgSecCheck 免费额度，与图片共享 100/h 合理
+    const rate = await checkRateLimit(OPENID);
+    if (!rate.allowed) {
+      return { errcode: -6, errmsg: 'rate limited' };
+    }
+    try {
+      // 旧版 wx-server-sdk 可能无 msgSecCheck 方法：typeof 判型给出明确错误码
+      // （仿 mediaCheckAsync 的 -12 分支，避免抛 TypeError 被 catch 吞成模糊 internal_error）
+      if (typeof cloud.openapi.security.msgSecCheck !== 'function') {
+        console.error('[secCheck] cloud.openapi.security.msgSecCheck 不存在（wx-server-sdk 版本过低？需 ≥ 1.8.0），请升级 wx-server-sdk 后重新部署');
+        return { errcode: -12, errmsg: 'sdk_unsupported_msgSecCheck' };
+      }
+      // R1 修复：msgSecCheck v2 的 scene 为必填参数（1资料/2评论/3论坛/4社交日志），
+      // 缺失会报参数错误被收敛为 -4 → 前端 fail-closed → 正式版昵称完全无法保存。
+      // 昵称编辑属「资料」场景，固定 scene=1。
+      const res = await cloud.openapi.security.msgSecCheck({
+        version: 2,
+        scene: 1,
+        openid: OPENID,
+        content: content
+      });
+      // msgSecCheck v2 同步返回 result.suggest（pass/review/risky）
+      const suggest = res && res.result && res.result.suggest ? String(res.result.suggest).toLowerCase() : '';
+      if (!suggest) {
+        console.error('[secCheck] msgSecCheck 未返回 suggest，完整响应:', JSON.stringify(res));
+        return { errcode: -11, errmsg: 'no suggest' };
+      }
+      return { errcode: 0, errmsg: 'ok', suggest };
+    } catch (e) {
+      // 异常收敛为固定 errmsg，绝不透传底层异常细节（M6 口径）；详细错误仅落服务端日志
+      const detail = (e && (e.errMsg || e.message || String(e))) || 'unknown';
+      console.error('[secCheck] 文本检测内部错误（不回传客户端）:', detail, e && e.stack ? e.stack : '');
+      return {
+        errcode: (e && e.errCode != null) ? e.errCode : -4,
+        errmsg: 'sec_check_internal_error'
+      };
     }
   }
 
@@ -322,6 +494,11 @@ exports.main = async (event) => {
     return { errcode: -6, errmsg: 'rate limited' };
   }
 
+  // P2-6 修复：submit 成功标记。成功路径不在 finally 立即删文件——mediaCheckAsync 是异步接口，
+  // 检测服务器在提交后数秒才下载 media_url，原「finally 立即 deleteFile」与之竞态会导致
+  // 下载失败（-1008）→ 合法图被误拦。成功路径的文件由 mediaCheckResult 写入最终结果后
+  // 兜底删除 + 前端轮询结束后兜底删除（用户图片不残留的隐私目标不变）。
+  let submitSucceeded = false;
   try {
     // 1) 换取临时访问 URL（mediaCheckAsync 要求 media_url 是检测服务器可下载的公网 URL）
     const urlRes = await cloud.getTempFileURL({ fileList: [fileID] });
@@ -367,7 +544,20 @@ exports.main = async (event) => {
       console.error('[secCheck] mediaCheckAsync 未返回 trace_id，完整响应:', JSON.stringify(res));
       return { errcode: -11, errmsg: 'no trace_id' };
     }
+
+    // P2-6 修复：submit 成功后向 sec_check_results 写入 pending 文档并保留 fileID。
+    // mediaCheckResult 稍后写最终结果时据此取回 fileID 做兜底删除（set 覆盖写会丢字段，
+    // 必须在此先落盘 fileID）。best-effort：写入失败仅告警，不阻断提交（前端轮询超时
+    // fail-closed 兜底仍在；文件清理退化为前端 deleteCloudFile 单层兜底）。
+    try {
+      await cloud.database().collection('sec_check_results').doc(traceId).set({
+        data: { status: 'pending', fileID: fileID, createdAt: Date.now() }
+      });
+    } catch (e) {
+      console.warn('[secCheck] 写入 pending 文档失败（云函数侧兜底删除将失效，依赖前端补删）:', (e && (e.errMsg || e.message)) || e);
+    }
     // 3) 返回 trace_id（异步检测已受理，结果由推送回写 sec_check_results）
+    submitSucceeded = true;
     return { errcode: 0, errmsg: 'ok', trace_id: traceId, status: 'submitted' };
   } catch (e) {
     // 4) 其余错误（网络/频率限制/云调用权限等）：统一收敛为固定 errcode + 通用 errmsg，
@@ -379,14 +569,20 @@ exports.main = async (event) => {
       errmsg: 'sec_check_internal_error'
     };
   } finally {
-    // 5) 清理云存储文件：无论提交是否成功，本文件都曾被上传到 sec_check/ 存储，
-    //    统一删除以避免用户图片残留（隐私 + 配额）；此为有意的隐私设计（测试已断言）。
+    // 5) 清理云存储文件（P2-6 修复：删除时机后移）：
+    //    - 失败路径（errcode≠0 / 抛异常 / 无 trace_id 等）：检测服务器不会消费该文件，
+    //      仍立即删除（隐私 + 配额清理不变；前端 checkImageByPath 会引导用户重选图重传，无数据损失）。
+    //    - 成功路径：不在 finally 立即删除（与 mediaCheckAsync 异步下载 media_url 竞态，
+    //      立即删会致 -1008 误拦合法图）。文件由 mediaCheckResult 写入最终结果后兜底删除，
+    //      前端 pollSecCheckResult 结束后另有 deleteCloudFile 二层兜底。
     //    注意：错误路径（如临时 URL 不可用 -8 / SDK 不支持 -12）下检测服务器未必下载过该文件，
-    //    但前端 checkImageByPath 在 errcode≠0 时会引导用户「重新选图重传」，本地原图不丢失，故无数据损失。
-    try {
-      await cloud.deleteFile({ fileList: [fileID] });
-    } catch (e) {
-      // 删除失败忽略（前端有兜底清理 deleteCloudFile）
+    //    但前端在 errcode≠0 时会引导用户「重新选图重传」，本地原图不丢失，故无数据损失。
+    if (!submitSucceeded) {
+      try {
+        await cloud.deleteFile({ fileList: [fileID] });
+      } catch (e) {
+        // 删除失败忽略（前端有兜底清理 deleteCloudFile）
+      }
     }
   }
 };

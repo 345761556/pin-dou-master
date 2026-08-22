@@ -331,12 +331,21 @@ function checkImageByPath(filePath, options = {}) {
           pollResult = await pollSecCheckResult(traceId);
         } catch (pollErr) {
           // 5) 轮询超时/失败：检测未在预期窗口完成 → fail-closed 拦截（无法确认安全即拒绝）。
-          //    不误删云存储（提交阶段云函数已删）；仅记告警便于排查。
           log.warn('[secCheck] 异步检测结果轮询失败（fail-closed 拦截）:', pollErr);
+          // P2-6 修复：轮询结束（无论成败）兜底删除云存储中转文件——submit 成功路径的
+          // 云函数已不再立即删文件（避免与异步检测下载竞态），此处为前端第一层兜底；
+          // mediaCheckResult 写入最终结果后另有云函数侧兜底删除，双层保证「图片不残留」。
+          await deleteCloudFile(fileID);
           return resolveFail('poll_failed', BLOCK_TYPE.ERROR);
         }
 
-        const suggest = (pollResult.suggest || 'pass').toLowerCase();
+        // P2-6 修复：检测已完成，统一在前端兜底删除云存储中转文件
+        // （mediaCheckResult 侧删除失败时由此补删；deleteCloudFile 内部吞错、幂等安全）
+        await deleteCloudFile(fileID);
+
+        // fail-closed 口径：suggest 缺失/空 → 按无法确认安全处理（走 unknown → 拦截），
+        // 绝不默认 'pass'（否则防御默认值方向与全模块 fail-closed 教义相悖，见 R1 教训）
+        const suggest = (pollResult.suggest || '').toLowerCase();
         log.info('[secCheck] 检测完成 suggest=' + suggest + ' scene=' + scene);
         // pass 放行；review/risky 一律拦截（对用户仅提示「含违规信息」，不展示细节）
         return {
@@ -363,13 +372,94 @@ function checkImageByPath(filePath, options = {}) {
   });
 }
 
+/**
+ * 文本内容安全检测云函数调用（msgSecCheck v2 同步接口，P1-1 昵称接入）
+ * @param {string} content - 待检文本
+ * @returns {Promise<{errcode?: number, suggest?: string, errmsg?: string}>}
+ */
+function callSecCheckText(content) {
+  return new Promise((resolve, reject) => {
+    wx.cloud.callFunction({
+      name: SEC_CHECK_FN,
+      data: { action: 'text', content },
+      // 文本检测为同步接口（无需上传/轮询），15s 已远超正常耗时；
+      // 超时走 fail → reject → checkText catch → fail-closed 拦截。
+      timeout: 15000,
+      success: (res) => {
+        const result = res && res.result;
+        if (!result || typeof result !== 'object') {
+          reject(new Error('sec_check_no_result'));
+          return;
+        }
+        resolve(result);
+      },
+      fail: (err) => reject(err)
+    });
+  });
+}
+
+// 文本长度上限（与云函数 text 分支一致：昵称保存前已截断到 20 字符，此处留余量到 50）
+const MAX_TEXT_LENGTH = 50;
+
+/**
+ * 文本内容安全检测主入口（昵称等 UGC 文本，对接 msgSecCheck v2）。
+ *
+ * 失败策略与图片链路完全同口径：fail-closed（通道不可用/异常/非法入参一律拦截，
+ * 仅 develop 环境 fail-open 放行），保证「文本防线」与「图片防线」强度一致，
+ * 不给审核留下「文本可绕过、图片不可绕过」的口径不一致漏洞。
+ *
+ * @param {string} content - 待检文本
+ * @returns {Promise<{pass: boolean, suggest: string, skipped: boolean, reason?: string, blockType?: string}>}
+ *   返回结构与 checkImageByPath 一致，可直接复用 blockMessage 生成差异化提示。
+ */
+function checkText(content) {
+  return new Promise((resolve) => {
+    // 前置守卫：入参合法性 + 云通道可用性（与 checkImageByPath 同款守卫顺序）
+    if (!content || typeof content !== 'string' || content.trim().length === 0 || content.length > MAX_TEXT_LENGTH) {
+      resolve(resolveFail('invalid_text', BLOCK_TYPE.ERROR));
+      return;
+    }
+    if (!isCloudAvailable()) {
+      resolve(resolveFail('cloud_unavailable', BLOCK_TYPE.UNAVAILABLE));
+      return;
+    }
+    callSecCheckText(content).then((result) => {
+      // 云函数返回非 0 errcode 视为检测通道异常 → fail-closed；限频(-6)单独标注差异化文案
+      if (result.errcode != null && result.errcode !== 0) {
+        log.warn('[secCheck] 文本检测云函数异常 errcode=' + result.errcode + ' errmsg=' + (result.errmsg || ''));
+        const blockType = (result.errcode === -6) ? BLOCK_TYPE.RATE : BLOCK_TYPE.ERROR;
+        resolve(resolveFail('text_errcode_' + result.errcode, blockType));
+        return;
+      }
+      const suggest = (result.suggest || '').toLowerCase();
+      // 仅 pass 放行；review/risky/未知建议一律拦截（与图片链路口径一致，不展示细节）
+      if (suggest !== 'pass') {
+        resolve({
+          pass: false,
+          suggest: ['pass', 'review', 'risky'].indexOf(suggest) !== -1 ? suggest : 'unknown',
+          skipped: false,
+          blockType: BLOCK_TYPE.VIOLATION
+        });
+        return;
+      }
+      resolve({ pass: true, suggest, skipped: false });
+    }).catch((err) => {
+      // 调用异常（网络/云环境未开通/云函数未部署）→ fail-closed 拦截
+      log.error('[secCheck] 文本检测调用失败，拦截（fail-closed）:', err);
+      resolve(resolveFail('text_call_failed', BLOCK_TYPE.ERROR));
+    });
+  });
+}
+
 module.exports = {
   checkImageByPath,
+  checkText,
   isCloudAvailable,
   isFailClosedMode,
   blockMessage,
   BLOCK_TYPE,
   SEC_CHECK_FN,
   MAX_IMAGE_BYTES,
+  MAX_TEXT_LENGTH,
   SCENE_WHITELIST
 };
