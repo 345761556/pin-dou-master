@@ -38,16 +38,16 @@ ok('saveTemplate 方法体可提取', saveTemplate.length > 0);
 ok('shareTemplate 方法体可提取', shareTemplate.length > 0);
 
 console.log('静态校验（B30: onUnload 兜底清除 loading 遮罩）:');
-ok('onUnload 方法体内含 wx.hideLoading() 兜底（页面销毁时清除可能残留的全局 loading 遮罩）',
-  /wx\.hideLoading\(\)/.test(onUnload));
-ok('onUnload 的 wx.hideLoading() 出现在定时器清理段（clearTimeout 之后、_templateData 置空前）',
-  /clearTimeout\(this\._invalidDataTimer\);[\s\S]*?wx\.hideLoading\(\);[\s\S]*?this\._templateData\s*=\s*null/.test(onUnload));
+ok('onUnload 方法体内含 hideLoading 兜底（页面销毁时清除可能残留的全局 loading 遮罩）',
+  /(?:wx\.hideLoading|safeHideLoading)\(\)/.test(onUnload));
+ok('onUnload 的 hideLoading 出现在定时器清理段（clearTimeout 之后、_templateData 置空前）',
+  /clearTimeout\(this\._invalidDataTimer\);[\s\S]*?(?:wx\.hideLoading|safeHideLoading)\(\);[\s\S]*?this\._templateData\s*=\s*null/.test(onUnload));
 
 console.log('静态校验（saveTemplate / shareTemplate 仍各自配对 loading）:');
-ok('saveTemplate 方法体含 wx.showLoading（开启遮罩）', /wx\.showLoading\(/.test(saveTemplate));
-ok('saveTemplate 方法体含 wx.hideLoading（关闭遮罩，成功/失败分支）', /wx\.hideLoading\(\)/.test(saveTemplate));
-ok('shareTemplate 方法体含 wx.showLoading（开启遮罩）', /wx\.showLoading\(/.test(shareTemplate));
-ok('shareTemplate 方法体含 wx.hideLoading（关闭遮罩，成功/失败分支）', /wx\.hideLoading\(\)/.test(shareTemplate));
+ok('saveTemplate 方法体含 showLoading（开启遮罩）', /(?:wx\.showLoading|safeShowLoading)\(/.test(saveTemplate));
+ok('saveTemplate 方法体含 hideLoading（关闭遮罩，成功/失败分支）', /(?:wx\.hideLoading|safeHideLoading)\(\)/.test(saveTemplate));
+ok('shareTemplate 方法体含 showLoading（开启遮罩）', /(?:wx\.showLoading|safeShowLoading)\(/.test(shareTemplate));
+ok('shareTemplate 方法体含 hideLoading（关闭遮罩，成功/失败分支）', /(?:wx\.hideLoading|safeHideLoading)\(\)/.test(shareTemplate));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

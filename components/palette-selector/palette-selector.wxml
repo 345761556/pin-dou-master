@@ -7,6 +7,6 @@
     bindtap="onTap"
   >
     <text class="tab-name">{{item.name}}</text>
-    <text class="tab-count">{{item.colors.length}}色</text>
+    <text class="tab-count">{{item.colors ? item.colors.length : 0}}色</text>
   </view>
 </scroll-view>

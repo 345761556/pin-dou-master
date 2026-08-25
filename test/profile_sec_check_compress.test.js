@@ -5,19 +5,19 @@
 //
 // 采用 scoped require 拦截：仅对 profile.js 引用的 '../../utils/util' 与 '../../utils/secCheck'
 // 替换为可观测桩（其余模块仍走真实实现），从而断言"压缩确实发生在送检之前、且送检的是压缩后路径"。
-// 运行：node test/profile_sec_check_compress.test.js
+// 运行：node test/profile_sec_check_compress.test.js,
 const path = require('path');
 const fs = require('fs');
 const Module = require('module');
 
 const PROFILE_MARK = 'pages/profile/profile.js';
 
-// ---- scoped require 拦截：仅 profile.js 引用替换为可观测桩 ----
+// ---- scoped require 拦截：仅 profile.js 引用替换为可观测桩 ----,
 let compressCalls = [];   // { p, max }
 let secCheckCalls = [];   // { path, opts }
-let removeCalls = [];     // removeFileIfExists 被调用的路径
-let secCheckShouldPass = true;  // 控制 secCheck 返回 pass/fail（验证拦截分支清理）
-let getImageInfoShouldFail = false;  // 控制展示用 getImageInfoWithTimeout 成功/失败（验证 B10 读取失败分支）
+let removeCalls = [];     // removeFileIfExists 被调用的路径,
+let secCheckShouldPass = true;  // 控制 secCheck 返回 pass/fail（验证拦截分支清理）,
+let getImageInfoShouldFail = false;  // 控制展示用 getImageInfoWithTimeout 成功/失败（验证 B10 读取失败分支）,
 const fakeUtil = {
   validateImageFile: async () => true,
   getTemplateHistory: () => [],
@@ -31,7 +31,9 @@ const fakeUtil = {
     return Promise.resolve({ width: 100, height: 100, type: 'png' });
   },
   removeFileIfExists: (p) => { removeCalls.push(p); },
-  CONSTANTS: { DEFAULT_IMAGE_SIZE: 800 }
+  CONSTANTS: { DEFAULT_IMAGE_SIZE: 800 },
+  safeShowLoading: () => {},
+  safeHideLoading: () => {}
 };
 const fakeSecCheck = {
   checkImageByPath: async (p, opts) => {
@@ -51,11 +53,11 @@ Module.prototype.require = function (id) {
   return origRequire.apply(this, arguments);
 };
 
-// ---- mock 微信环境 ----
+// ---- mock 微信环境 ----,
 let copyCalls = [];
 let getImageInfoCalls = [];
 let chooseMediaSuccess = null;
-let chooseMediaDone = null;   // 捕获 success 异步回调返回的 promise，便于测试 await 完成
+let chooseMediaDone = null;   // 捕获 success 异步回调返回的 promise，便于测试 await 完成,
 let toasts = [];
 global.getApp = () => ({ globalData: {} });
 global.wx = {
@@ -89,7 +91,7 @@ function ok(name, cond) {
   else { failed++; console.log('FAIL | ' + name); }
 }
 
-// ---- 静态断言：导入与 WXML 结构 ----
+// ---- 静态断言：导入与 WXML 结构 ----,
 const src = fs.readFileSync(path.join(__dirname, '..', 'pages', 'profile', 'profile.js'), 'utf8');
 ok('profile.js 导入 compressImageIfNeeded', /compressImageIfNeeded/.test(src));
 ok('profile.js 导入 CONSTANTS', /CONSTANTS/.test(src));
@@ -149,12 +151,12 @@ ok('profile.wxml 含 #__compress-canvas（让压缩真正生效）', /id="__comp
   await d.uploadPickerImage();
   await chooseMediaDone;
   ok('uploadPickerImage 安全拦截 → 清理【压缩后】临时文件（checkPath !== tempFilePath）',
-    removeCalls.length === 1 && removeCalls[0] === 'compressed://wxfile://tmp/picker.png');
-  ok('uploadPickerImage 安全拦截 → 不删除原图 tempFilePath',
-    removeCalls.indexOf('wxfile://tmp/picker.png') === -1);
+    removeCalls.length === 2 && removeCalls[0] === 'compressed://wxfile://tmp/picker.png');
+  ok('uploadPickerImage 安全拦截 → 一并清理原始临时文件 tempFilePath（本图被拒、非当前展示，防孤儿累积）',
+    removeCalls.indexOf('wxfile://tmp/picker.png') !== -1);
 
   // 场景5：B10 —— 展示图读取（getImageInfoWithTimeout）失败分支：
-  //        不应残留旧图 + 「读取失败」提示矛盾的脏展示态；压缩临时图顺手清理防累积。
+  //        不应残留旧图 + 「读取失败」提示矛盾的脏展示态；压缩临时图顺手清理防累积。,
   //        用预置 pickerImagePath('wxfile://old.png') 模拟「用户已有一张旧图、本次换图读取失败」场景。
   reset();
   getImageInfoShouldFail = true;
@@ -168,10 +170,11 @@ ok('profile.wxml 含 #__compress-canvas（让压缩真正生效）', /id="__comp
   ok('B10 读取失败 → 清空展示态 pickerImageInfo 为 null',
     e.data.pickerImageInfo === null);
   ok('B10 读取失败 → 清理【压缩后】临时文件（checkPath !== tempFilePath，防累积）',
-    removeCalls.length === 1 && removeCalls[0] === 'compressed://wxfile://tmp/picker.png');
-  ok('B10 读取失败 → 不删除原图 tempFilePath',
-    removeCalls.indexOf('wxfile://tmp/picker.png') === -1);
+    removeCalls.indexOf('compressed://wxfile://tmp/picker.png') !== -1);
+  ok('B10 读取失败 → 一并清理原始临时文件 tempFilePath（读取失败不再需要，防孤儿累积）',
+    removeCalls.indexOf('wxfile://tmp/picker.png') !== -1);
 
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 })();
+

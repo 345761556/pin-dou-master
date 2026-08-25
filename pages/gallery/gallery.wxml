@@ -7,7 +7,7 @@
   <!-- 历史记录网格 -->
   <view wx:if="{{historyList.length > 0}}" class="gallery-grid">
     <view class="gallery-card card" wx:for="{{historyList}}" wx:key="id"
-      bindtap="viewTemplate" data-index="{{index}}">
+      bindtap="viewTemplate" data-index="{{index}}" data-id="{{item.id}}">
       
       <!-- 模板颜色预览 -->
       <view class="card-preview">

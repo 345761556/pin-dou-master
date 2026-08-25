@@ -57,10 +57,19 @@ function calcLegendHeight(availableWidth, materialCount) {
   // 与 renderTemplate 内联公式逐字一致：每项宽 36-80px 自适应，行数向上取整，底边距 10
   const legendItemWidth = Math.max(36, Math.min(80, Math.floor(availableWidth / materialCount)));
   const legendRowCount = Math.ceil((legendItemWidth * materialCount) / availableWidth);
-  return legendRowCount * 50 + 10;
+  // 行高 70（与 _drawLegend 的 legendRowHeight 严格一致）：单行内容 = 色块(≤24) + 编号(≤18)
+  // + 数量(≤14) + 间距 ≈ 61px，此前 50px 行高在多行图例时第二行会与第一行文字重叠。
+  return legendRowCount * 70 + 10;
 }
 
 // ==================== 颜色空间工具 ====================
+
+// 维度硬上限（模块级单一真源）：rleDecode（解码）与 renderTemplate（渲染）同源复用，
+// 避免「解码侧钳制、渲染侧不钳制」的防御不对称（外部审查 #3）。
+// 合法模板上限为 MAX_COLS(120) × MAX_ROWS(120) = 14400 格；此处取更宽松但仍安全的硬上限，
+// 既不影响正常历史记录，又杜绝脏 cols/rows（如 1e6）撑爆渲染循环/画布（M2 同源决策）。
+const DIM_HARD = 4096;     // 单维硬上限（与 iOS 画布 4096 维度限制同级）
+const CELLS_HARD = 20000;  // 总格数硬上限（远高于正常 14400，远低于 OOM 量级）
 
 // 算法常量
 const ALGO = {
@@ -68,6 +77,7 @@ const ALGO = {
   MAX_PIXELS: CONSTANTS.MAX_PIXELS,          // 模板行列乘积上限（单一真源见 util.js CONSTANTS）
   MAX_ROWS: CONSTANTS.MAX_ROWS,              // 最大行数限制（单一真源见 util.js CONSTANTS）
   TRANSPARENCY_ALPHA: 128, // 透明度判定阈值（alpha < 该值视为透明/白色背景）；matchToPalette 与 generateTemplate 共用同一真源，避免改一处漏另一处
+  NEAR_WHITE_THRESHOLD: 250, // 近白像素阈值：r/g/b 均 > 此值视为近白 → 映射到色卡中实际最接近白色的珠子；matchToPalette 与 generateTemplate 三处共用同一真源，避免改一处漏另两处（P2-4 修复）
   PROGRESS: {
     INIT: 5,
     DRAWN: 15,
@@ -103,6 +113,12 @@ function hexToRgb(hex) {
     // 仅支持 3/6/8 位，其余长度（如 2 位 '#FF'、4/5/7 位）视为非法 → 黑色兜底
     return { r: 0, g: 0, b: 0 };
   }
+  // 非法字符兜底：6 位但含非 hex 字符（如 #1G2F3D）时 parseInt('1G',16) 会部分解析
+  // 返回 1 而非黑色——与「非法输入→黑色兜底」的文档语义矛盾。用全串正则先校验，
+  // 任一字符非法即返回黑色（与长度非法同处理，避免脏色号混入色卡）。
+  if (!/^[0-9a-fA-F]{6}$/.test(hex)) {
+    return { r: 0, g: 0, b: 0 };
+  }
   return {
     r: parseInt(hex.substring(0, 2), 16) || 0,
     g: parseInt(hex.substring(2, 4), 16) || 0,
@@ -129,11 +145,17 @@ function rgbToHex(r, g, b) {
  * 按精确 (r,g,b) 记忆化可零行为变更地削峰——白/黑/常见色与抖动后重复值在精确 key 下命中率极高。
  * 注：若可接受 ~1/8 每通道的极小 Lab 近似，可把 key 改为 (r>>3,g>>3,b>>3) 进一步提命中率；
  *     此处用精确 key 保证输出与改动前逐字节一致（现有等价测试即锁此不变性）。
- * 守卫：缓存上限 30 万条，超限整体清空，避免跨多次生成无限增长。
+ * 守卫：缓存上限 5 万条（交叉审查 #7 由 30 万下调：单次生成至多 ~8千 唯一色，5 万已覆盖
+ *     约 6 次生成的热点集；峰值内存从 ~30MB 降至 ~5MB，低端机更友好），超限整体清空，
+ *     避免跨多次生成无限增长。清空后重建成本低（Lab 是微秒级纯函数），无感知抖动。
  */
 const _labCache = new Map();
 function rgbToLab(r, g, b) {
-  const key = ((r & 0xff) << 16) | ((g & 0xff) << 8) | (b & 0xff);
+  // 越界输入归一化（与下方缓存 key 的掩码语义一致）：key 用 & 0xff 但计算若用原始值，
+  // 越界输入（256→0、-1→255）会「同 key 不同值」污染模块级 _labCache（跨多次生成持久），
+  // 后续合法调用命中污染条目返回错误 Lab。归一化后 key 与计算值严格一致，合法输入 0-255 行为不变。
+  r = r & 0xff; g = g & 0xff; b = b & 0xff;
+  const key = (r << 16) | (g << 8) | b;
   const cached = _labCache.get(key);
   if (cached) return cached;
   // RGB -> XYZ
@@ -153,7 +175,12 @@ function rgbToLab(r, g, b) {
     a: 500 * (fx - fy),
     b: 200 * (fy - fz)
   };
-  if (_labCache.size > 300000) _labCache.clear();
+  if (_labCache.size > 50000) _labCache.clear();
+  // Object.freeze 后再缓存（外部审查 #13）：缓存的 lab 对象若被调用方直接修改 l/a/b，
+  // 会污染模块级 _labCache 跨多次生成持久（后续同 key 命中返回被污染的值）。冻结后
+  // 严格模式写/普通模式赋值均失败（静默或抛错），杜绝共享可变引用。每次生成只读不写，
+  // 冻结零行为变更，开销（每色一次 freeze）在 µs 级可忽略。
+  Object.freeze(lab);
   _labCache.set(key, lab);
   return lab;
 }
@@ -162,6 +189,13 @@ function rgbToLab(r, g, b) {
  * 计算两个 Lab 颜色之间的 CIE76 Delta E（感知距离）
  * 值越小表示颜色越接近，一般认为 < 2.3 人类无法区分 */
 function labDistance(lab1, lab2) {
+  // 判空守卫（findWhiteColor:297 / matchToPalette:331 的色卡元素可能缺 lab，
+  // 直接访问 undefined.l 会抛 TypeError 且无提示）。缺失的 lab 视为「距离无穷大」：
+  // 在匹配循环中不会被选中，调用方拿到 Infinity 可判定该色不可用，永不崩溃。
+  // 正常链路 initPalette 必算 lab，此守卫仅兜底外部手造色卡漏填 lab 的场景。
+  if (!lab1 || !lab2 || typeof lab1.l !== 'number' || typeof lab2.l !== 'number') {
+    return Infinity;
+  }
   const dL = lab1.l - lab2.l;
   const da = lab1.a - lab2.a;
   const db = lab1.b - lab2.b;
@@ -188,6 +222,10 @@ function calcDeltaE(r1, g1, b1, r2, g2, b2) {
  * @returns {Array} 调色板 [{r, g, b}, ...]
  */
 function medianCutQuantize(pixels, maxColors) {
+  // 判空守卫（与同模块 hexToRgb/matchToPalette/rleDecode/getAverageColor 的判空口径一致）：
+  // 导出 API 被外部以 undefined/null/非数组调用时，原实现直接访问 pixels.length 抛 TypeError。
+  // 返回空数组（无像素 → 无色卡输出），调用方（generateTemplate）以此为「无量化色」安全降级。
+  if (!Array.isArray(pixels)) return [];
   if (pixels.length === 0) return [];
   if (maxColors <= 1) {
     return [getAverageColor(pixels)];
@@ -288,7 +326,11 @@ function getAverageColor(pixels) {
  */
 function findWhiteColor(palette) {
   if (!palette || palette.length === 0) {
-    return { id: 'C01', name: '白色', hex: '#FFFFFF' };
+    // 空色卡不伪造 C01 色号（跨色卡色号污染病根，见 289 行注释）：返回空 id 哨兵，
+    // 调用方把空 id 视为「无白色可映射」，绝不凭空造出色号染错颜色。
+    // 正常生成链路在 generateTemplate 顶部已有「色卡为空直接抛错」守卫，此分支仅
+    // 兜底导出 API 被外部直接以空色卡调用（地雷拆除）。
+    return { id: '', name: '', hex: '' };
   }
   const whiteLab = rgbToLab(255, 255, 255);
   let best = palette[0];
@@ -313,11 +355,14 @@ function findWhiteColor(palette) {
  */
 function matchToPalette(r, g, b, palette, alpha = 255) {
   if (!palette || palette.length === 0) {
-    return { id: 'C01', name: '白色', hex: '#FFFFFF', distance: Infinity };
+    // 空色卡不伪造 C01 色号（同 findWhiteColor 289 行注释的跨色卡污染病根）：
+    // 返回空 id + Infinity 距离哨兵，调用方拿到 distance=Infinity 可判定「无匹配」。
+    // 正常链路 generateTemplate 顶部守卫已保证色卡非空，此分支仅兜底导出 API 误用。
+    return { id: '', name: '', hex: '', distance: Infinity };
   }
   // 透明像素（alpha < ALGO.TRANSPARENCY_ALPHA）或接近白色的像素 → 映射到色卡中实际最接近白色的珠子
   // 修复：原先硬编码 id:'C01'，在 HAMA/Perler 等非 C01 色卡中会凭空造出色号并染错颜色
-  if (alpha < ALGO.TRANSPARENCY_ALPHA || (r > 250 && g > 250 && b > 250)) {
+  if (alpha < ALGO.TRANSPARENCY_ALPHA || (r > ALGO.NEAR_WHITE_THRESHOLD && g > ALGO.NEAR_WHITE_THRESHOLD && b > ALGO.NEAR_WHITE_THRESHOLD)) {
     return { ...findWhiteColor(palette), distance: 0 };
   }
   const inputLab = rgbToLab(r, g, b);
@@ -362,11 +407,18 @@ function generateTemplate(canvas, image, options, onProgress) {
     colorCount = 30,
     palette = [],
     useDithering = true,
+    fillBackgroundWhite = false,
     shouldCancel = null
   } = options;
 
   if (!palette || palette.length === 0) {
     throw new Error('请先加载色卡数据');
+  }
+
+  // P3-2 修复：image 参数判空（与下方 canvas 判空同口径，消除防御不对称）。
+  // 导出 API 被外部误用（传 null/undefined）时抛友好错误，而非 image.width 的 TypeError。
+  if (!image || typeof image.width !== 'number' || typeof image.height !== 'number') {
+    throw new Error('图片数据无效，请重新选择图片');
   }
 
   // 1. 计算模板尺寸
@@ -386,7 +438,11 @@ function generateTemplate(canvas, image, options, onProgress) {
   const aspect = imgH / imgW;
 
   // 模板的拼豆列数和行数
-  let cols = maxBeadWidth;
+  // 列数钳制到 MAX_COLS：clampTemplateSize 只钳「像素乘积 + 最大行数」，不钳单维列数——
+  // 若调用方传超大 maxBeadWidth（如 5000），cols 可超 MAX_COLS(120)，与 RLE 注释的
+  // 「合法模板上限 120×120」契约不符（解码侧 DIM_HARD=4096 虽兜底，但编码契约应一致）。
+  // 钳制后再走 clampTemplateSize 做像素/行数收敛（超宽场景 cols 可能被像素上限进一步缩小）。
+  let cols = Math.min(maxBeadWidth, CONSTANTS.MAX_COLS);
   let rows = Math.round(cols * aspect);
   // 确保至少一个拼豆
   if (cols < 1) cols = 1;
@@ -403,8 +459,22 @@ function generateTemplate(canvas, image, options, onProgress) {
   // 真正耗时的绘制/量化/匹配/抖动封装为异步 Promise，按行分块让出主线程，
   // 使 onProgress 的 setData 能真实 paint、UI 不长时间卡死（High-1 修复）。
   // 顶部尺寸/调色板校验保持同步抛错（快速失败，便于调用方立即捕获）。
+  // canvas 判空也放在同步段：节点缺失属于调用方参数错误，应同步抛错而非在异步体
+  // 内变成 Promise 拒绝（后者错误被吞成 unhandled rejection，调用方难以及时感知）。
+  if (!canvas || typeof canvas.getContext !== 'function') {
+    throw new Error('Canvas 节点缺失或未初始化');
+  }
   return (async () => {
   // 2. 将图片缩小到 cols x rows 的临时 Canvas
+  // ⚠️ 共享 canvas 契约（对抗式审查）：本函数会改写调用方传入的 canvas（重设 width/height +
+  // 绘制）。像素数据在【首个同步块】（async IIFE 开头至 getImageData，本函数首个 await 之前）
+  // 即完整读取，后续分块计算不再触碰 canvas——因此「生成期间（秒级）复用同一 canvas」只会
+  // 影响首个同步块窗口，不会在分块阶段产生像素错乱。调用方契约：
+  //   - 应传入专用离屏 canvas（index.js 传 #offscreen-canvas，且生成入口有 generating 守卫
+  //     + chooseImage 的 _measuring 互斥锁，杜绝与透明测量并发改写）；
+  //   - 首个同步块期间不得并发复用该 canvas（JS 单线程 + 同步块原子性天然满足）。
+  // 未做内部离屏改造的原因：wx.createOffscreenCanvas 在部分基础库/机型不可用，改造收益低、
+  // 引入兼容面；现有调用方契约已覆盖全部生产路径。
   const tempCanvas = canvas;
   tempCanvas.width = cols;
   tempCanvas.height = rows;
@@ -442,10 +512,12 @@ function generateTemplate(canvas, image, options, onProgress) {
   if (sampledPixels.length > ALGO.SAMPLE_PIXELS) {
     const step = Math.max(1, Math.floor(sampledPixels.length / ALGO.SAMPLE_PIXELS));
     const capped = [];
-    // 确保采样数量不超过限制
+    // 确保采样数量不超过限制：break 判断须在 push 【之前】——原实现在 push 后才检查
+    // `capped.length >= SAMPLE_PIXELS`，当 length=10001、step=2 时会采到 5001 个
+    // （第 5001 次 push 后才触发 break），超出上限 1 个。提前检查后恰好在达到上限时停。
     for (let i = 0; i < sampledPixels.length; i += step) {
-      capped.push(sampledPixels[i]);
       if (capped.length >= ALGO.SAMPLE_PIXELS) break;
+      capped.push(sampledPixels[i]);
     }
     sampledPixels = capped;
   }
@@ -506,12 +578,18 @@ function generateTemplate(canvas, image, options, onProgress) {
     //
     // ⚡ Medium-3 修复：diffuse 闭包提到循环外定义一次（仅捕获 data/cols/rows，误差分量作参数传入），
     //    避免原「每像素 new 一次箭头函数 + 闭包」的分配开销。
+    // P2-3 修复：diffuse 内部增加 alpha 守卫——仅当目标像素不透明时才写入误差。
+    //   原实现对透明区也写入误差（误差"困"在透明像素 RGB 中永不传播），导致半透明边缘（如 LOGO 边缘）
+    //   在开启抖动时出现轻微色阶断层或边缘晕圈。标准 Floyd-Steinberg 要求误差沿不透明区域连续传播。
     const diffuse = (px, py, factor, eR, eG, eB) => {
       if (px >= 0 && px < cols && py >= 0 && py < rows) {
         const i = (py * cols + px) * 4;
-        data[i] = Math.max(0, Math.min(255, data[i] + eR * factor));
-        data[i + 1] = Math.max(0, Math.min(255, data[i + 1] + eG * factor));
-        data[i + 2] = Math.max(0, Math.min(255, data[i + 2] + eB * factor));
+        // P2-3：仅向不透明像素扩散误差（透明区不再"吸收"误差后断流）
+        if (data[i + 3] >= ALGO.TRANSPARENCY_ALPHA) {
+          data[i] = Math.max(0, Math.min(255, data[i] + eR * factor));
+          data[i + 1] = Math.max(0, Math.min(255, data[i + 1] + eG * factor));
+          data[i + 2] = Math.max(0, Math.min(255, data[i + 2] + eB * factor));
+        }
       }
     };
     for (let y = 0; y < rows; y++) {
@@ -528,12 +606,14 @@ function generateTemplate(canvas, image, options, onProgress) {
         //  - fillBackgroundWhite=true：映射为当前色卡真实白色并计入材料（用于需要完整矩形的场景）。
         const isTransparent = a < ALGO.TRANSPARENCY_ALPHA;
         if (isTransparent) {
-          if (options.fillBackgroundWhite) {
+          if (fillBackgroundWhite) {
             // 透明区必须用「完整色卡」找白，而非量化子集 usedPalette/matchPalette：
             // 当图片无近白色调时，子集里的"最接近白"是灰/米/红等，会把背景染错、
             // 并导致真实白色不进 materialList（白豆数量少计）。与 matchToPalette 的
             // 近白分支（同样用完整 palette 找白）保持一致。
-            const white = findWhiteColor(palette);
+            // R3 对齐：复用循环外已算的 paletteWhite（palette 固定、结果相同），
+            // 避免白底大图每个透明像素重算一次 findWhiteColor（O(paletteSize) 全扫描）。
+            const white = paletteWhite;
             template[y][x] = white.id;
             if (!materialStats[white.id]) {
               materialStats[white.id] = { count: 0, color: white };
@@ -551,7 +631,8 @@ function generateTemplate(canvas, image, options, onProgress) {
         // 里找白，图无近白色调时子集里的"最接近白"是浅灰/米色，与下方透明/fillBackgroundWhite
         // 分支「用完整 palette 找白」的注释声明不一致。近白与背景白统一色号后不参与误差扩散
         // （与背景白同等待遇，避免把近白像素的量化误差扩散污染主体边缘）。
-        if (r > 250 && g > 250 && b > 250) {
+        // P2-4 修复：阈值统一走 ALGO.NEAR_WHITE_THRESHOLD，避免改此处漏改 matchToPalette/非抖动分支
+        if (r > ALGO.NEAR_WHITE_THRESHOLD && g > ALGO.NEAR_WHITE_THRESHOLD && b > ALGO.NEAR_WHITE_THRESHOLD) {
           template[y][x] = paletteWhite.id;
           if (!materialStats[paletteWhite.id]) {
             materialStats[paletteWhite.id] = { count: 0, color: paletteWhite };
@@ -601,9 +682,12 @@ function generateTemplate(canvas, image, options, onProgress) {
 
         const isTransparent = a < ALGO.TRANSPARENCY_ALPHA;
         if (isTransparent) {
-          if (options.fillBackgroundWhite) {
-            // 透明区必须用「完整色卡」找白（理由同上，与抖动分支保持一致）
-            const white = findWhiteColor(palette);
+          if (fillBackgroundWhite) {
+            // 透明区必须用「完整色卡」找白（理由同上，与抖动分支保持一致）。
+            // 复用循环外算好的 paletteWhite（547 行）：非抖动分支此前在循环内每透明像素
+            // 重调 findWhiteColor（白底大图 + fillBackgroundWhite 场景性能回退，与抖动
+            // 分支的 R3 优化自相矛盾）。findWhiteColor 是纯函数（palette 固定），结果不变。
+            const white = paletteWhite;
             template[y][x] = white.id;
             if (!materialStats[white.id]) {
               materialStats[white.id] = { count: 0, color: white };
@@ -616,7 +700,8 @@ function generateTemplate(canvas, image, options, onProgress) {
         }
 
         // P3-e 修复：近白像素显式用「完整色卡」找白（口径与抖动分支一致，理由见上）
-        if (r > 250 && g > 250 && b > 250) {
+        // P2-4 修复：阈值统一走 ALGO.NEAR_WHITE_THRESHOLD
+        if (r > ALGO.NEAR_WHITE_THRESHOLD && g > ALGO.NEAR_WHITE_THRESHOLD && b > ALGO.NEAR_WHITE_THRESHOLD) {
           template[y][x] = paletteWhite.id;
           if (!materialStats[paletteWhite.id]) {
             materialStats[paletteWhite.id] = { count: 0, color: paletteWhite };
@@ -688,7 +773,6 @@ function generateTemplate(canvas, image, options, onProgress) {
  */
 function renderTemplate(ctx, templateData, options = {}) {
   const {
-    cellSize = 10,
     showGrid = true,
     showLabels = true,
     showColorLabels = true,
@@ -697,7 +781,33 @@ function renderTemplate(ctx, templateData, options = {}) {
     offsetY = 0
   } = options;
 
-  const { template, cols, rows, materialList } = templateData;
+  // 顶层结构防御（外部审查 #2/#3）：templateData/template 缺失或 cols/rows/cellSize 为脏值
+  // 时，下方 _drawBeads 的 template[y]、totalWidth = cols*cellSize 等会抛 TypeError 或产生
+  // 巨大画布长时间卡死（decode 侧有 DIM_HARD/CELLS_HARD 钳制，render 侧此前不对称）。
+  // 与 materialList 的 Array.isArray 防御同教义：字段级脏数据一律收敛，不抛错、不卡死。
+  if (!templateData || typeof templateData !== 'object') {
+    return { canvasWidth: 0, canvasHeight: 0 };
+  }
+  const { template, cols: rawCols, rows: rawRows, materialList } = templateData;
+  // template 顶层非数组（undefined/对象/字符串）→ 按空矩阵处理（_drawBeads 整行空位）
+  const safeTemplate = Array.isArray(template) ? template : [];
+  // 数值护栏：cols/rows 钳到 [1, DIM_HARD] 且乘积 ≤ CELLS_HARD（与 rleDecode 同源钳制）——
+  // 脏 cols:1e6 不再撑爆循环/画布；cellSize 钳到 [1, 4096] 且有限（NaN/Infinity/0/负数收敛）
+  const normDim = (v) => {
+    const n = Math.floor(Number(v));
+    if (!isFinite(n) || n < 1) return 1;
+    if (n > DIM_HARD) return DIM_HARD;
+    return n;
+  };
+  let cols = normDim(rawCols);
+  let rows = normDim(rawRows);
+  if (cols * rows > CELLS_HARD) rows = Math.max(1, Math.floor(CELLS_HARD / cols));
+  const normCell = (v) => {
+    const n = Number(v);
+    if (!isFinite(n) || n < 1) return 10; // 回落默认 10（与 renderTemplate 默认值一致）
+    return Math.min(n, DIM_HARD);
+  };
+  const cellSize = normCell(options.cellSize);
   // 防御字段级脏数据：materialList 可能缺失（非数组）或元素缺 color 字段，
   // 直接 item.color.id 会抛 TypeError 拖垮整个预览（L2 威胁模型未覆盖的渲染端）。
   const matList = Array.isArray(materialList) ? materialList : [];
@@ -731,9 +841,10 @@ function renderTemplate(ctx, templateData, options = {}) {
 
   // 拆分绘制职责：拼豆 / 网格 / 标注(坐标数字 + 每格色号) / 图例。
   // 各子函数保持原绘制顺序与坐标、颜色、字号不变（见等价性测试 render_template_refactor.test.js）。
-  _drawBeads(ctx, { template, colorMap, startX, startY, cellSize, beadType, showColorLabels, cols, rows });
+  // 统一用 safeTemplate（顶层防御后的数组），子函数内部的行级防御继续兜底。
+  _drawBeads(ctx, { template: safeTemplate, colorMap, startX, startY, cellSize, beadType, showColorLabels, cols, rows });
   _drawGrid(ctx, { startX, startY, cols, rows, cellSize, showGrid });
-  _drawLabels(ctx, { template, startX, startY, cellSize, cols, rows, showLabels, showColorLabels });
+  _drawLabels(ctx, { template: safeTemplate, startX, startY, cellSize, cols, rows, showLabels, showColorLabels });
   _drawLegend(ctx, { startX, startY, cellSize, cols, rows, totalWidth, showColorLabels, materialList: matList });
 
   return { canvasWidth: totalWidth, canvasHeight: totalHeight };
@@ -743,8 +854,13 @@ function renderTemplate(ctx, templateData, options = {}) {
 // 与外部调用约定：colorMap 由 renderTemplate 预构建；px/py 基于 startX/startY 计算。
 function _drawBeads(ctx, { template, colorMap, startX, startY, cellSize, beadType, showColorLabels, cols, rows }) {
   for (let y = 0; y < rows; y++) {
+    // 结构校验（与 materialList 的 Array.isArray 防御同教义）：脏数据行数 < rows 时
+    // template[y] 为 undefined → template[y][x] 抛 TypeError 拖垮整个预览/导出。
+    // 行缺失/非数组按「整行空位」处理（与 rleDecode 的空位语义一致），不抛错。
+    const row = template[y];
+    if (!Array.isArray(row)) continue;
     for (let x = 0; x < cols; x++) {
-      const colorId = template[y][x];
+      const colorId = row[x];
       // 空位哨兵：不放置珠子。用浅灰底 + 斜叉明确区别于"白色珠子"，
       // 避免用户把"空着"误读成"这里要拼白珠"。纯白渲染会误导，故必须 visibly distinct。
       if (colorId == null) {
@@ -883,8 +999,11 @@ function _drawLabels(ctx, { template, startX, startY, cellSize, cols, rows, show
     const useCornerLabel = cellSize >= 15;
 
     for (let y = 0; y < rows; y++) {
+      // 结构校验（同 _drawBeads）：脏数据行数 < rows 时整行跳过，不抛 TypeError
+      const row = template[y];
+      if (!Array.isArray(row)) continue;
       for (let x = 0; x < cols; x++) {
-        const colorId = template[y][x];
+        const colorId = row[x];
         // 空位不画颜色编号（避免把 null 渲染成文字）
         if (colorId == null) continue;
         const px = startX + x * cellSize;
@@ -897,8 +1016,13 @@ function _drawLabels(ctx, { template, startX, startY, cellSize, cols, rows, show
           ctx.textAlign = 'right';
           ctx.textBaseline = 'bottom';
 
-          const labelW = ctx.measureText(colorId).width + 4;
+          let labelW = ctx.measureText(colorId).width + 4;
           const labelH = fontSize + 2;
+
+          // P3-3 修复：cellSize=15 时 fontSize=7，"C01"(3字符) labelW≈16>cellSize，
+          // fillRect 起点 px+cellSize-labelW-1 < px，向左溢出进入前一个格子（淡化相邻颜色）。
+          // 钳制 labelW 到 cellSize-2（保留 2px 右边距），溢出时文字自动缩短或换行（measureText 不变，仅限制背景矩形）。
+          labelW = Math.min(labelW, cellSize - 2);
 
           // 只画文字区域的半透明背景，不覆盖格子主体
           ctx.fillStyle = 'rgba(255,255,255,0.8)';
@@ -956,9 +1080,13 @@ function _drawLegend(ctx, { startX, startY, cellSize, cols, rows, totalWidth, sh
     const totalLegendWidth = actualItemWidth * itemsPerRow;
     const startLegendX = (totalWidth - totalLegendWidth) / 2;
 
-    // 图例背景高度根据行数调整
-    const legendRowHeight = 50;
-    const legendBgHeight = legendRowCount * legendRowHeight + 10;
+    // 图例背景高度根据行数调整。
+    // 高度预算对齐（交叉审查修复）：画布为图例预留 legendHeight=行数*70+10（calcLegendHeight），
+    // 背景起点在 legendY-5（上留白 5px），故背景高度取 行数*70+5 时底边恰好与画布底边齐平：
+    //   legendY - 5 + (行数*70 + 5) = startY + rows*cellSize + 行数*70 + 10 = totalHeight ✓
+    // 行高 70 才能容纳单行「色块(≤24) + 编号(≤18) + 数量(≤14)」≈61px，50 会多行重叠。
+    const legendRowHeight = 70;
+    const legendBgHeight = legendRowCount * legendRowHeight + 5;
 
     // 图例背景
     ctx.fillStyle = '#F8F8F8';
@@ -1006,7 +1134,31 @@ function _drawLegend(ctx, { startX, startY, cellSize, cols, rows, totalWidth, sh
  * 初始化色卡数据（预计算 LAB 值，避免重复计算）
  */
 function initPalette(colorLibrary) {
-  return colorLibrary.map(c => {
+  // 保留命名空间防御（交叉审查 #10）：'__E__' 是 RLE 空位哨兵（EMPTY_CELL_TOKEN），
+  // 真实色号若以 '__' 开头会与空位令牌产生编解码歧义。现有受控色卡库（C01/H7 等字母开头）
+  // 不会命中；此处兜底拒绝 + 告警，杜绝未来新增色卡误用保留前缀。
+  let safeLibrary = colorLibrary.filter(c => !(c && typeof c.id === 'string' && c.id.indexOf('__') === 0));
+  if (safeLibrary.length !== colorLibrary.length) {
+    console.warn('[beadEngine] initPalette 检测到保留前缀 "__" 的色号（与 RLE 空位哨兵冲突），已拒绝', colorLibrary.length - safeLibrary.length, '项');
+  }
+  // 重复 id 防御（外部审查 #14）：重复 id 会让 colorMap 后写覆盖先写、材料统计/渲染错位，
+  // 且静默进入算法无任何提示（未来新增色卡误复制一行时极难排查）。按 id 去重保留首个 + 告警。
+  const seenIds = new Set();
+  const uniqueLibrary = [];
+  for (const c of safeLibrary) {
+    if (!c || typeof c.id !== 'string') continue;
+    if (seenIds.has(c.id)) {
+      console.warn('[beadEngine] initPalette 检测到重复色号 id=' + c.id + '，已跳过（保留首个）');
+      continue;
+    }
+    seenIds.add(c.id);
+    uniqueLibrary.push(c);
+  }
+  if (uniqueLibrary.length !== safeLibrary.length) {
+    console.warn('[beadEngine] initPalette 共去重', safeLibrary.length - uniqueLibrary.length, '个重复色号');
+  }
+  safeLibrary = uniqueLibrary;
+  return safeLibrary.map(c => {
     const rgb = hexToRgb(c.hex);
     const lab = rgbToLab(rgb.r, rgb.g, rgb.b);
     return { ...c, r: rgb.r, g: rgb.g, b: rgb.b, lab };
@@ -1030,8 +1182,10 @@ function rleEncode(template) {
   // RLE 串并持久化。此处统一 sanitize，与 rleDecode 的「永不抛、脏数据归空位」防御哲学一致——
   // 不直接 throw（避免保存链路丢作品），但绝不产出 undefined/NaN 字面令牌。
   if (!Array.isArray(template) || template.length === 0) return '';
-  const firstRow = template[0];
-  if (!Array.isArray(firstRow)) return '';
+  // 首行可能为稀疏数组空洞/非数组行（如 [, ['A','B'] ] 中 template[0] 为 hole）——
+  // 此处不直接 return ''（整份模板静默丢弃，与下方逐行容忍空洞补空位的逻辑自相矛盾，
+  // 且会让历史记录静默丢失整份作品），统一交给下方按行遍历逻辑补空位。cols 计算循环
+  // 只统计数组行，故全为空洞行时 cols===0 仍会正确 return ''。
 
   // 规范列数取「最大行宽」而非首行列数：规整矩阵下 maxWidth === row0.length，行为不变；
   // 脏矩阵下避免长行被首行列数截断为 undefined（静默丢色），只把较短行末尾补空位。
@@ -1055,10 +1209,12 @@ function rleEncode(template) {
     for (let c = 0; c < cols; c++) {
       const cell = row[c];
       // 元素必须是字符串色号或 null/空位；其余（undefined/number/object）一律归一为空位，
-      // 杜绝把 undefined 编码进 RLE 串（M5：畸形历史矩阵不再持久化为脏数据）
+      // 杜绝把 undefined 编码进 RLE 串（M5：畸形历史矩阵不再持久化为脏数据）。
+      // P3-5 修复：字符串色号还需排除含 RLE 分隔符 ':'/';' 的脏值——含冒号的异常色号会
+      // 产出歧义 RLE 串，rleDecode 用 lastIndexOf(':') 解析会错位。
       if (cell == null) {
         flat.push(EMPTY_CELL_TOKEN);
-      } else if (typeof cell === 'string' && cell.length > 0) {
+      } else if (typeof cell === 'string' && cell.length > 0 && cell.indexOf(':') === -1 && cell.indexOf(';') === -1) {
         flat.push(cell);
       } else {
         flat.push(EMPTY_CELL_TOKEN);
@@ -1089,8 +1245,7 @@ function rleDecode(encoded, cols, rows) {
   // 合法模板上限为 MAX_COLS(120) × MAX_ROWS(120) = 14400 格；这里用更宽松但仍安全的
   // 硬上限，既不影响任何正常历史记录，又杜绝 cols/rows 被篡改/截断为极大值后
   // Array.from({length: rows}) 与矩阵构建撑爆内存（M2：累计总长 + 维度双重防护）。
-  const DIM_HARD = 4096;     // 单维硬上限（与 iOS 画布 4096 维度限制同级）
-  const CELLS_HARD = 20000;  // 总格数硬上限（远高于正常 14400，远低于 OOM 量级）
+  // 注：DIM_HARD/CELLS_HARD 为模块级常量（renderTemplate 等渲染侧同源复用）。
 
   let safeCols = Math.floor(Number(cols));
   let safeRows = Math.floor(Number(rows));
@@ -1114,12 +1269,20 @@ function rleDecode(encoded, cols, rows) {
   }
   const chunks = encoded.split(';');
   const flat = [];
-  for (const chunk of chunks) {
+  // 脏串扫描上限：全是非法 chunk 的脏串（如 'x:0;y:0;z:0;...' 百万个）在 flat 不增长时
+  // 也会完整遍历 chunks.length 次（纯 CPU 空转）。合法模板 chunk 数 ≤ 格子数(14400)，
+  // 上限取 10 万（远高于合法值、足够容纳多段历史脏数据），超限视为数据损坏直接截断。
+  const CHUNK_SCAN_LIMIT = 100000;
+  for (let ci = 0; ci < chunks.length && ci < CHUNK_SCAN_LIMIT; ci++) {
+    const chunk = chunks[ci];
     const colonIdx = chunk.lastIndexOf(':');
     if (colonIdx === -1) continue;
     const colorId = chunk.substring(0, colonIdx);
     const countStr = chunk.substring(colonIdx + 1);
-    const parsed = parseInt(countStr, 10);
+    // 严格数字校验（外部审查）：parseInt('5abc', 10) = 5 会对脏串部分解析——'C01:5abc'
+    // 会被当作 count=5 接受，脏数据静默进入算法。改用「纯数字」正则 + Number 精确解析，
+    // 任何非纯数字（含尾随字符/前导空白/小数）一律跳过该 chunk。
+    const parsed = /^\d+$/.test(countStr) ? Number(countStr) : NaN;
     // 异常数据防护：count 必须有限且为正；且不得超过本模板总格数
     // （maxCells 已随维度钳制而安全，不再受脏 cols 放大；无上限的极大 count 会卡死/内存暴涨）
     if (isNaN(parsed) || parsed <= 0 || parsed > maxCells) continue;

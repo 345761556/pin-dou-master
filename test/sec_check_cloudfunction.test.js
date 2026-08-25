@@ -105,7 +105,7 @@ const fakeCloud = {
   getWXContext: () => ({ OPENID: currentOpenid }),
   downloadFile: async ({ fileID }) => { downloadCalls.push(fileID); return { fileContent: Buffer.from('dummy-image-bytes') }; },
   deleteFile: async ({ fileList }) => { deleteCalls.push(fileList); return {}; },
-  getTempFileURL: async ({ fileList }) => ({ fileList: (fileList || []).map((id) => ({ fileID: id, tempFileURL: 'https://example.com/' + id })) }),
+  getTempFileURL: async ({ fileList }) => ({ fileList: (fileList || []).map((id) => ({ fileID: id, tempFileURL: 'https://example.com/' + id, status: 0 })) }),
   openapi: { security: { mediaCheckAsync: async (args) => { secCheckArgs.push(args); return { errcode: 0, errmsg: 'ok', traceId: 'trace-test-001' }; } } },
   database: () => db
 };
@@ -211,10 +211,11 @@ ok('媒体安全接口守卫：mediaCheckAsync 调用前做 typeof 判型（旧�
   dbRows = [];
 
   // 5) 幂等 upsert：同一 openid 多次调用只产生 1 条限频文档（L4 修复：杜绝并发 add 重复记录）
+  //    注意：pending 文档（_id=traceId）也含 openid 字段，须按 _id===openid 只统计限频文档
   dbRows = []; currentOpenid = 'userE';
   await secCheckMain({ type: 'image', scene: 2, fileID: 'cloud://env-test/sec_check/1700000000000_e1.png' });
   await secCheckMain({ type: 'image', scene: 2, fileID: 'cloud://env-test/sec_check/1700000000000_e2.png' });
-  const eDocs = dbRows.filter((r) => r.openid === 'userE');
+  const eDocs = dbRows.filter((r) => r._id === 'userE');
   ok('同一 openid 多次调用限频集合只产生 1 条文档（幂等 upsert，无重复记录）', eDocs.length === 1);
 
   // 3) 限频：窗口内 openid 已用满 RATE_LIMIT_MAX(100) → 限频 -6，不 download/delete

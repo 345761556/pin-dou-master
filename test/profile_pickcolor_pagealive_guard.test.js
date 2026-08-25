@@ -5,14 +5,14 @@
 //       this.setData，触发「页面已卸载 setData」告警。
 // 修复：onShow 置 this._pageAlive=true、onHide 置 false；query.exec 回调入口与 img.onload 入口均
 //       加 this._pageAlive===false 提前 return，避免在隐藏页 setData（与 index.generateTemplate #5 对齐）。
-// 运行：node test/profile_pickcolor_pagealive_guard.test.js
+// 运行：node test/profile_pickcolor_pagealive_guard.test.js,
 const path = require('path');
 const fs = require('fs');
 const Module = require('module');
 
 const PROFILE_MARK = 'pages/profile/profile.js';
 
-// scoped require 拦截：仅 profile.js 引用的 util / secCheck 替换为轻量桩（与 profile_sec_check_compress 同款，确保可加载）
+// scoped require 拦截：仅 profile.js 引用的 util / secCheck 替换为轻量桩（与 profile_sec_check_compress 同款，确保可加载）,
 const fakeUtil = {
   validateImageFile: async () => true,
   getTemplateHistory: () => [],
@@ -25,7 +25,7 @@ const fakeSecCheck = {
   checkImageByPath: async () => ({ pass: true, suggest: 'pass', skipped: false }),
   blockMessage: (r, def) => def
 };
-// 取色匹配路径用到的色彩库/豆引擎：用受控桩替换，避免依赖真实色卡数据是否加载
+// 取色匹配路径用到的色彩库/豆引擎：用受控桩替换，避免依赖真实色卡数据是否加载,
 const fakeColorLib = {
   getCurrentColors: () => ([{ id: 'C01', name: '白', hex: '#FFFFFF', r: 255, g: 255, b: 255 }])
 };
@@ -44,10 +44,10 @@ Module.prototype.require = function (id) {
   return origRequire.apply(this, arguments);
 };
 
-// ---- mock 微信环境 ----
-let execCb = null;          // query.exec 回调
-let imgOnload = null;       // imgEl.onload
-let toastTitles = [];       // 捕获 showToast 文案，用于验证超时看门狗
+// ---- mock 微信环境 ----,
+let execCb = null;          // query.exec 回调,
+let imgOnload = null;       // imgEl.onload,
+let toastTitles = [];       // 捕获 showToast 文案，用于验证超时看门狗,
 const fakeCtx = {
   fillStyle: '', fillRect() {}, drawImage() {},
   getImageData: (x, y, w, h) => ({ data: [10, 20, 30, 255] })
@@ -92,7 +92,7 @@ function ok(name, cond) {
   else { failed++; console.log('FAIL | ' + name); }
 }
 
-// ---- 静态断言 ----
+// ---- 静态断言 ----,
 const profSrc = fs.readFileSync(path.join(__dirname, '..', 'pages', 'profile', 'profile.js'), 'utf8');
 ok('onShow 中置 this._pageAlive = true', /onShow\(\)\s*\{[^}]*this\._pageAlive\s*=\s*true/.test(profSrc));
 ok('onHide 中置 this._pageAlive = false', /onHide\(\)\s*\{[^}]*this\._pageAlive\s*=\s*false/.test(profSrc));
@@ -117,10 +117,9 @@ ok('[Medium-Low-1] img.onload / img.onerror 均先置 pickerSettled 并 clearTim
     ctx._pageAlive = false;   // 模拟用户已切走 tab
     ctx.pickColorAtPoint(50, 50);
     // pickColorAtPoint 内部触发 query.exec(cb)，我们的 mock 把 cb 存到 execCb
-    execCb([
-      { width: 100, height: 100, left: 0, top: 0 },   // imgRect
-      { node: fakeCanvas }                              // canvasRes
-    ]);
+    execCb([{
+      width: 100, height: 100, left: 0, top: 0
+    }, { node: fakeCanvas }]);
     ok('场景A：隐藏页时 query.exec 回调提前 return（未注册 img.onload）', imgOnload === null);
     ok('场景A：隐藏页时未触发 setData（pickedColor 未设置）', ctx.data.pickedColor === undefined);
   }
@@ -131,10 +130,9 @@ ok('[Medium-Low-1] img.onload / img.onerror 均先置 pickerSettled 并 clearTim
     const ctx = makeCtx();
     ctx._pageAlive = true;    // 模拟页面在前台
     ctx.pickColorAtPoint(50, 50);
-    execCb([
-      { width: 100, height: 100, left: 0, top: 0 },
-      { node: fakeCanvas }
-    ]);
+    execCb([{
+      width: 100, height: 100, left: 0, top: 0
+    }, { node: fakeCanvas }]);
     // 手动触发 img.onload（模拟图片加载完成）
     if (typeof imgOnload === 'function') imgOnload();
     ok('场景B：存活页时注册了 img.onload 并触发取色', typeof imgOnload === 'function');
@@ -148,10 +146,9 @@ ok('[Medium-Low-1] img.onload / img.onerror 均先置 pickerSettled 并 clearTim
     const ctx = makeCtx({ pickerHistory: originalRef });
     ctx._pageAlive = true;
     ctx.pickColorAtPoint(50, 50);
-    execCb([
-      { width: 100, height: 100, left: 0, top: 0 },
-      { node: fakeCanvas }
-    ]);
+    execCb([{
+      width: 100, height: 100, left: 0, top: 0
+    }, { node: fakeCanvas }]);
     if (typeof imgOnload === 'function') imgOnload();
     // 修复后：history = originalRef.slice()（新数组）再 unshift + setData，
     // 故 this.data.pickerHistory 是「新引用」，原数组 originalRef 不应被改动。
@@ -168,10 +165,9 @@ ok('[Medium-Low-1] img.onload / img.onerror 均先置 pickerSettled 并 clearTim
     const ctx = makeCtx();
     ctx._pageAlive = true;
     ctx.pickColorAtPoint(50, 50);
-    execCb([
-      { width: 100, height: 100, left: 0, top: 0 },
-      { node: fakeCanvas }
-    ]);
+    execCb([{
+      width: 100, height: 100, left: 0, top: 0
+    }, { node: fakeCanvas }]);
     // 关键：绝不调用 imgOnload / 不触发 onerror（模拟回调永不触发）
     ok('场景D：超时前未静默 setData pickedColor（无响应但不崩溃）', ctx.data.pickedColor === undefined);
     await new Promise((r) => setTimeout(r, 1700));
@@ -181,3 +177,4 @@ ok('[Medium-Low-1] img.onload / img.onerror 均先置 pickerSettled 并 clearTim
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
 })();
+

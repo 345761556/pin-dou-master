@@ -98,7 +98,7 @@ const fakeCloud = {
   getWXContext: () => ({ OPENID: currentOpenid }),
   getTempFileURL: async ({ fileList }) => {
     // 模拟返回临时 URL
-    return { fileList: [{ fileID: fileList[0], tempFileURL: 'https://example.com/temp.png' }] };
+    return { fileList: [{ fileID: fileList[0], tempFileURL: 'https://example.com/temp.png', status: 0 }] };
   },
   downloadFile: async ({ fileID }) => { downloadCalls.push(fileID); return { fileContent: Buffer.from('dummy-image-bytes') }; },
   deleteFile: async ({ fileList }) => { deleteCalls.push(fileList); return {}; },

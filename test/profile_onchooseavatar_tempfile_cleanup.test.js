@@ -29,6 +29,9 @@ const fakeUtil = {
   getImageInfoWithTimeout: () => Promise.resolve({ width: 100, height: 100, type: 'png' }),
   removeFileIfExists: (p) => { removeCalls.push(p); },
   CONSTANTS: { DEFAULT_IMAGE_SIZE: 800 }
+,
+  safeShowLoading: () => {},
+  safeHideLoading: () => {}
 };
 const fakeSecCheck = {
   checkImageByPath: async (p, opts) => {

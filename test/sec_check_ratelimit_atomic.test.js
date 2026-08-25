@@ -99,7 +99,7 @@ const fakeCloud = {
   downloadFile: async () => ({ fileContent: Buffer.from('dummy-image-bytes') }),
   // 换取临时访问 URL（main 在限频放行后会调用，缺此桩会抛 getTempFileURL is not a function → errcode -4，
   // 导致「限频放行」用例误判为失败；与限频逻辑无关，纯测试桩补全）。
-  getTempFileURL: async () => ({ fileList: [{ tempFileURL: 'https://example.com/sec_check/x.png' }] }),
+  getTempFileURL: async () => ({ fileList: [{ tempFileURL: 'https://example.com/sec_check/x.png', status: 0 }] }),
   deleteFile: async () => ({}),
   // 图片检测接口为 mediaCheckAsync（异步），须提供该桩，否则 typeof !== 'function' 短路返回 -12；
   // 返回 trace_id 使 main 完整跑通返回 errcode 0。
@@ -195,7 +195,9 @@ ok('S3: 源码内存兜底仅作数据库故障降级（memoryRateLimit）', /me
   ok('并发空文档首访不崩溃且至少放行 100 次（增量路径上限生效）', allowed2 >= 100);
   ok('并发空文档首访后计数恒 ≤100（原子 _.inc 兜底，杜绝计数溢出）', gDoc && gDoc.count >= 1 && gDoc.count <= 100);
 
-  // 7) 内存兜底降级：数据库抛错时不崩溃，正常放行；B21：降级须打印告警（且同进程去重只打一次）
+  // 7) 内存兜底降级：限频 DB 抛错时不崩溃；但 pending 文档写入同样依赖 DB →
+  //    无法落 pending 时 fail-closed 返回 -14（阻断提交，避免「表面受理实际必被误拦」），
+  //    B21：降级须打印告警（且同进程去重只打一次）
   reset('f'); dbThrow = true;
   let errLogs = [];
   const origErr = console.error;
@@ -203,7 +205,8 @@ ok('S3: 源码内存兜底仅作数据库故障降级（memoryRateLimit）', /me
   r = await call('f');
   const rDegrade2 = await call('f'); // 同进程第二次降级，应去重不再打印完整错误
   console.error = origErr;
-  ok('数据库不可用 → 内存兜底放行（errcode 0）', r && r.errcode === 0 && rDegrade2 && rDegrade2.errcode === 0);
+  ok('数据库不可用 → 不崩溃，fail-closed 返回 -14（pending 无法落盘，阻断提交）',
+    r && r.errcode === -14 && rDegrade2 && rDegrade2.errcode === -14);
   ok('B21: 降级时打印告警（提示已退化为单实例内存兜底 + 免费额度风险）',
     errLogs.some((m) => m.includes('限频数据库不可用') && m.includes('已降级为单实例内存兜底')));
   ok('B21: 同进程重复降级仅告警一次（避免持续故障期日志风暴）',

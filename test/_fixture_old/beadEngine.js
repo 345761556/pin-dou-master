@@ -564,7 +564,7 @@ function renderTemplate(ctx, templateData, options = {}) {
     const availableWidth = (offsetX + labelSpace + cols * cellSize) - 20;
     const legendItemWidth = Math.max(36, Math.min(80, Math.floor(availableWidth / materialList.length)));
     const legendRowCount = Math.ceil((legendItemWidth * materialList.length) / availableWidth);
-    legendHeight = legendRowCount * 50 + 10;
+    legendHeight = legendRowCount * 70 + 10;
   }
   const totalWidth = startX + cols * cellSize;
   const totalHeight = startY + rows * cellSize + legendHeight;
@@ -702,8 +702,13 @@ function renderTemplate(ctx, templateData, options = {}) {
           ctx.textAlign = 'right';
           ctx.textBaseline = 'bottom';
 
-          const labelW = ctx.measureText(colorId).width + 4;
+          let labelW = ctx.measureText(colorId).width + 4;
           const labelH = fontSize + 2;
+
+          // P3-3 同步（fixture 基线）：cellSize=15 时 fontSize=7，"C01"(3字符) labelW≈16>cellSize，
+          // fillRect 起点 px+cellSize-labelW-1 < px，向左溢出进入前一个格子（淡化相邻颜色）。
+          // 钳制 labelW 到 cellSize-2（保留 2px 右边距），与 utils/beadEngine.js 当前实现保持一致。
+          labelW = Math.min(labelW, cellSize - 2);
 
           // 只画文字区域的半透明背景，不覆盖格子主体
           ctx.fillStyle = 'rgba(255,255,255,0.8)';
@@ -760,8 +765,8 @@ function renderTemplate(ctx, templateData, options = {}) {
     const startLegendX = (totalWidth - totalLegendWidth) / 2;
 
     // 图例背景高度根据行数调整
-    const legendRowHeight = 50;
-    const legendBgHeight = legendRowCount * legendRowHeight + 10;
+    const legendRowHeight = 70;
+    const legendBgHeight = legendRowCount * legendRowHeight + 5;
 
     // 图例背景
     ctx.fillStyle = '#F8F8F8';

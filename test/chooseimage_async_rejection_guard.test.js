@@ -172,7 +172,10 @@ ok('profile.uploadPickerImage catch 仅兜底、不吞掉 chooseMedia 自身失�
         // 桩须提供二者，否则正常路径 P-C 会在 getImageInfo 步骤即抛「is not a function」（与 profile_sec_check_compress.test.js 同口径）。
         getImageInfoWithTimeout: () => Promise.resolve({ width: 100, height: 100, type: 'png' }),
         removeFileIfExists: () => {},
-        CONSTANTS: { DEFAULT_IMAGE_SIZE: 800 }
+        CONSTANTS: { DEFAULT_IMAGE_SIZE: 800 },
+        // F3：profile.js 统一从 utils/util 解构 safeShowLoading/safeHideLoading，桩必须提供
+        safeShowLoading: () => {},
+        safeHideLoading: () => {}
       };
     }
     if (id.indexOf('utils/secCheck') !== -1 && fn.indexOf('pages/profile/profile.js') !== -1) {

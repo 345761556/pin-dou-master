@@ -11,6 +11,10 @@
       "desc": "选择图片或视频用于生成拼豆模板"
     },
     {
+      "action": "chooseImage",
+      "desc": "低版本基础库回退路径：选择图片用于生成拼豆模板（chooseMedia 的兼容替代）"
+    },
+    {
       "action": "chooseAvatar",
       "desc": "选择微信头像用于个人资料展示"
     }

@@ -4,7 +4,7 @@ const beadEngine = require('../../utils/beadEngine');
 // 透明判定阈值（alpha < 该值视为透明/空位），与 beadEngine.generateTemplate 共用单一真源
 const { TRANSPARENCY_ALPHA } = beadEngine;
 const colorLib = require('../../utils/colorLibrary');
-const { getBeadSizePresets, formatNumber, formatMm, compressImageIfNeeded, clampTemplateSize, validateImageFile, getTemplateHistory, getImageInfoWithTimeout, CONSTANTS, MAX_HISTORY, MAX_PIXELS, debounce, removeFileIfExists } = require('../../utils/util');
+const { getBeadSizePresets, formatNumber, formatMm, compressImageIfNeeded, clampTemplateSize, validateImageFile, getTemplateHistory, getImageInfoWithTimeout, CONSTANTS, MAX_HISTORY, MAX_PIXELS, debounce, removeFileIfExists, safeShowLoading, safeHideLoading } = require('../../utils/util');
 // 偏好读取 + 拼豆尺寸范围常量（BEAD_SIZE.MIN/MAX 定义在 app.js 的 CONSTANTS 中，
 // util.js 的 CONSTANTS 不含该字段，故单独以 APP_CONSTANTS 导入以免与下方 util 的 CONSTANTS 混淆）
 const { getBeadPrefs, CONSTANTS: APP_CONSTANTS } = require('../../app.js');
@@ -85,6 +85,9 @@ Page({
       totalBeads: 0,
       size: ''
     },
+    // ① 透明占比测量进行中标记：测量期间预估区显示「测量中…」占位，
+    // 避免 transparentRatio 仍为旧图值/初始值时预估区显示旧图珠数或「0 颗」。
+    estimateMeasuring: false,
 
     // UI 状态
     isAdvancedOpen: false
@@ -104,7 +107,10 @@ Page({
     // 防止本地存储中残留的越界值（如 beadSize=200 / colorCount=0）被直接写入 data 引发异常。
     this.setData({
       beadSize: Math.max(APP_CONSTANTS.BEAD_SIZE.MIN, Math.min(APP_CONSTANTS.BEAD_SIZE.MAX, prefs.beadSize)),
-      beadType: prefs.beadType,
+      // 白名单校验（交叉审查修复）：getBeadPrefs 仅做 string 类型校验，脏值（如 'triangle'）会穿透。
+      // 与 app.js _initPreferences 的白名单口径对齐，防止首页形状按钮选中态与实际渲染（globalData 口径）不一致。
+      beadType: [APP_CONSTANTS.BEAD_TYPE.SQUARE, APP_CONSTANTS.BEAD_TYPE.CIRCLE].includes(prefs.beadType)
+        ? prefs.beadType : APP_CONSTANTS.BEAD_TYPE.DEFAULT,
       colorCount: Math.max(2, Math.min(50, prefs.colorCount)),
       useDithering: prefs.useDithering,
       // 安全读取布尔偏好：wx.getStorageSync 在存储损坏/序列化异常时会抛错，
@@ -142,8 +148,11 @@ Page({
   // 同时取消 pending debounce 定时器，避免 300ms 后回调在已销毁页面上调 this.setData。
   onUnload() {
     this._pageAlive = false;
-    if (this.debouncedOnColsChange) this.debouncedOnColsChange.cancel();
-    if (this.debouncedOnColorCountChange) this.debouncedOnColorCountChange.cancel();
+    // 判型守卫（真机修复）：微信基础库 Page 构造器对方法属性可能做 bind/代理处理，
+    // 函数引用上的附加属性 .cancel 会丢失（bind 返回新函数不带原函数属性）——
+    // 曾实测报「debouncedOnColsChange.cancel is not a function」。加 typeof 守卫防御。
+    if (this.debouncedOnColsChange && typeof this.debouncedOnColsChange.cancel === 'function') this.debouncedOnColsChange.cancel();
+    if (this.debouncedOnColorCountChange && typeof this.debouncedOnColorCountChange.cancel === 'function') this.debouncedOnColorCountChange.cancel();
   },
 
   // 加载色卡列表和当前色卡
@@ -180,6 +189,13 @@ Page({
     if (!key || key === this.data.selectedPalette) return;
 
     const colors = colorLib.switchPalette(key);
+    // P2-1 修复：switchPalette 存储失败（配额满）时回退全局色卡并 return []，
+    // 此处必须拦截——否则 UI 显示新色卡名但列表为空、globalData 仍旧值，
+    // 后续 generateTemplate 读旧色卡生成，与界面所示不一致。
+    if (!colors || colors.length === 0) {
+      wx.showToast({ title: '切换失败，请重试', icon: 'none' });
+      return;
+    }
     const maxCount = colorLib.getPaletteColorCount(key);
     // 切换色卡后同步：若历史 colorCount 超出新色卡容量，钳制到上限
     const clampedColorCount = Math.min(this.data.colorCount, maxCount);
@@ -196,20 +212,34 @@ Page({
 
   // 选择图片
   async chooseImage() {
-    wx.chooseMedia({
-      count: 1,
-      mediaType: ['image'],
-      sourceType: ['album', 'camera'],
-      success: async (res) => {
-        // 防止连点「选择图片」触发多个 chooseMedia 异步链并发：首个链处理中
-        // （校验 + 压缩 + secCheck + 透明统计 + setData）时忽略后续触发，避免重复
-        // 消耗 secCheck 检测配额（后端 100 次/h 限频虽兜底，并发链仍会重复计数）
-        // 与对状态的并发写。与 profile.uploadPickerImage _pickerBusy 同款机制。
-        // finally 保证任何路径（成功/异常/拦截）都复位，不会卡死后续选择。
-        if (this._pickerBusy) return;
-        this._pickerBusy = true;
-        try {
-        const tempFiles = res.tempFiles || [];
+    // 防连点前置（#12 修复）：_pickerBusy 原在 success 回调内才置位，但 wx.chooseMedia 是
+    // 同步调用、success 是异步回调——两次快速点击会在第一个 success 到达前并发拉起两个
+    // 原生选择器（重复弹窗 + 浪费 secCheck 配额）。改为函数入口先检查+置位，
+    // success/fail 双路径复位（fail 里也必须复位，否则用户取消后 _pickerBusy 卡死）。
+    if (this._pickerBusy) return;
+    this._pickerBusy = true;
+    const releaseBusy = () => { this._pickerBusy = false; };
+
+    const handleSuccess = async (res) => {
+      try {
+        // 归一化 chooseMedia / chooseImage 两种回调结构，并显式补齐 validateImageFile 依赖的字段：
+        //   - chooseMedia：res.tempFiles 元素为 { tempFilePath, size, fileType }（fileType 恒为 'image'，
+        //     mediaType 已限定 image）
+        //   - chooseImage（低版本降级）：res.tempFiles 元素为 { path, size }（无 tempFilePath/fileType），
+        //     res.tempFilePaths 为纯字符串数组
+        // 缺陷修复（#13 引入）：原实现 `res.tempFiles || tempFilePaths.map(p => ({tempFilePath:p}))`
+        // 两种分支都缺 fileType → validateImageFile 首句 `fileType !== 'image'` 恒真 → 降级路径永远
+        // 弹「请选择图片文件」；且 chooseImage 走 tempFiles 分支时 tempFilePath 为 undefined →
+        // compressImageIfNeeded(undefined) reject。此处统一映射补齐 tempFilePath/fileType/size。
+        // 注：size 缺失时 validateImageFile 的 `size > 10MB` 判 false 放行（安全：后续压缩 + secCheck
+        // 7MB 守卫仍兜底）。
+        const tempFiles = res.tempFiles
+          ? res.tempFiles.map(f => ({
+              tempFilePath: f.path || f.tempFilePath,
+              size: f.size,
+              fileType: 'image'
+            }))
+          : (res.tempFilePaths || []).map(p => ({ tempFilePath: p, fileType: 'image' }));
         const tempFile = tempFiles[0];
 
         // 防御：用户未选择任何文件
@@ -245,13 +275,14 @@ Page({
         // 场景 scene=4（社交日志，用户创作内容）；通道不可用时内部降级放行。
         // P2-3 修复：检测链路含云存储上传 + 异步轮询，耗时数秒，加 loading 遮罩防止用户
         // 误以为无响应而重复选图；show/hide 紧贴 secCheck 调用对，拦截 return 路径也已关闭遮罩。
-        if (typeof wx.showLoading === 'function') wx.showLoading({ title: '安全检测中...', mask: true });
+        // F3：统一走 utils/util 的 safeShowLoading/safeHideLoading（测试桩兼容守卫）。
+        safeShowLoading({ title: '安全检测中...', mask: true });
         // R2 修复：检测意外 reject 时也必须关闭遮罩，否则 mask:true 全屏 loading 永久卡死页面
         let secResult;
         try {
           secResult = await secCheck.checkImageByPath(processed.tempFilePath, { scene: 4 });
         } finally {
-          if (typeof wx.hideLoading === 'function') wx.hideLoading();
+          safeHideLoading();
         }
         if (!secResult.pass) {
           // 仅提示违规，不向用户暴露检测细节（与 P2-1 错误信息收敛原则一致）。
@@ -265,6 +296,21 @@ Page({
           return;
         }
 
+        // 存活守卫（外部审查 #3）：选图链（校验+压缩+secCheck）数秒，期间用户可能已切 tab/
+        // 退后台（onHide 置 _pageAlive=false，实例仍存活）。此 setData 写 imagePath 属页面状态，
+        // 隐藏页写入最坏产生告警（与 _measureTransparency/generateTemplate 回调的守卫口径一致）；
+        // 守卫返回时压缩产物 processed.tempFilePath 无人引用（拦截分支同款清理防孤儿）。
+        if (this._pageAlive === false) {
+          removeFileIfExists(processed.tempFilePath);
+          return;
+        }
+        // P3-6 修复：换图成功后清理上一次的临时图片（与拦截/隐藏分支的 removeFileIfExists 同口径）。
+        // 旧 imagePath 是上次 chooseImage 的压缩产物（wxfile://tmp），本次已被新图取代、无任何引用；
+        // 生成模板时的原图已另行复制到 history_source_*（USER_DATA_PATH 持久化），删临时文件不影响对照原图。
+        const prevImagePath = this.data.imagePath;
+        if (prevImagePath && prevImagePath !== processed.tempFilePath && !isRemoteImageUrl(prevImagePath)) {
+          removeFileIfExists(prevImagePath);
+        }
         this.setData({
           imagePath: processed.tempFilePath,
           imageSize: { width: processed.width, height: processed.height }
@@ -289,6 +335,13 @@ Page({
         // 默认列数取 min(该图上限, DEFAULT_COLS)：普通图保留 50 的适中默认（避免每次选图都跳到
         // 接近上限的大模板，生成更慢、材料清单更长）；极端竖图(aspect>20)上限本身 < 50，则取真实
         // 上限，保证「slider 显示值 == 实际生成」始终一致（修复 L1 的显示/生成不符）。
+        // 换图前取消 pending 的 slider 防抖：若用户拖动列数后 300ms 内完成选图，迟到的
+        // debouncedOnColsChange 会用新图的 colMin/colMax 钳制旧拖动值，覆盖本处刚写下的
+        // 新图默认列数（外部审查「两次 setData 间窗口」的真实风险形态）。cancel 后本次换图
+        // 的默认列数不再被旧拖动值回写。
+        // 判型守卫（真机修复）：基础库对 Page 方法属性做 bind 处理时 .cancel 可能丢失，
+        // 报「cancel is not a function」——守卫后最多不退订防抖，功能不受影响。
+        if (this.debouncedOnColsChange && typeof this.debouncedOnColsChange.cancel === 'function') this.debouncedOnColsChange.cancel();
         this.setData({
           templateCols: Math.min(capCols, CONSTANTS.DEFAULT_COLS),
           colMin,
@@ -296,10 +349,21 @@ Page({
         });
 
         // 一次性统计透明像素占比，使首页预估"总珠数"与实际生成一致（剔除透明空格）
-        const ratio = await this._measureTransparency(processed.tempFilePath);
-        this.setData({ transparentRatio: ratio });
-
+        // ① 测量前先置 estimateMeasuring=true 并刷新预估区为「测量中…」占位，
+        //    避免 transparentRatio 仍为旧图值/初始值时预估区显示旧图珠数或「0 颗」；
+        //    await 后用真实 ratio 复位 estimateMeasuring=false 再刷新显示真实值。
+        // ③ _measuring 互斥锁：阻止测量期间 generateTemplate 重设 #offscreen-canvas 造成竞态，
+        //    用 try/finally 保证任意路径（含异常/页面跳转）都复位，不会卡死后续测量。
+        this.setData({ estimateMeasuring: true });
         this.updateEstimate();
+        this._measuring = true;
+        try {
+          const ratio = await this._measureTransparency(processed.tempFilePath);
+          this.setData({ transparentRatio: ratio, estimateMeasuring: false });
+          this.updateEstimate();
+        } finally {
+          this._measuring = false;
+        }
         } catch (err) {
           // H1 修复：async success 回调内多个 await（validateImageFile / secCheck.checkImageByPath /
           // setData / updateEstimate 等）若抛异常，会被吞成「未处理的 Promise 拒绝」——wx.chooseMedia 的
@@ -308,24 +372,52 @@ Page({
           log.error('[chooseImage] 异步处理异常（兜底未处理拒绝）:', err);
           wx.showToast({ title: '图片处理失败，请重试', icon: 'none' });
         } finally {
-          this._pickerBusy = false;
+          releaseBusy();
         }
-      },
-      fail: (err) => {
-        // 失败回调：避免隐私未授权等异常静默（用户点"选择图片"无反应）
-        const msg = (err && err.errMsg) || '';
-        if (msg.indexOf('cancel') !== -1) return; // 用户主动取消，不打扰
-        if (msg.indexOf('privacy') !== -1 || msg.indexOf('scope is not declared') !== -1) {
-          wx.showToast({ title: '请先同意隐私授权后重试', icon: 'none' });
-          return;
-        }
-        wx.showToast({ title: '选择图片失败，请重试', icon: 'none' });
+    };
+
+    const handleFail = (err) => {
+      // 失败回调：避免隐私未授权等异常静默（用户点"选择图片"无反应）。
+      // 复位 _pickerBusy：入口已前置置位（#12），fail 路径必须复位，否则取消后卡死。
+      releaseBusy();
+      const msg = (err && err.errMsg) || '';
+      if (msg.indexOf('cancel') !== -1) return; // 用户主动取消，不打扰
+      if (msg.indexOf('privacy') !== -1 || msg.indexOf('scope is not declared') !== -1) {
+        wx.showToast({ title: '请先同意隐私授权后重试', icon: 'none' });
+        return;
       }
-    });
+      wx.showToast({ title: '选择图片失败，请重试', icon: 'none' });
+    };
+
+    // #13 修复：feature-detect——低版本基础库（<2.10.0）无 wx.chooseMedia 时回退 wx.chooseImage。
+    // 两者回调结构不同（chooseMedia 返回 res.tempFiles 对象数组，chooseImage 返回 res.tempFilePaths
+    // 字符串数组），handleSuccess 开头已做归一化兼容。
+    if (typeof wx.chooseMedia === 'function') {
+      wx.chooseMedia({
+        count: 1,
+        mediaType: ['image'],
+        sourceType: ['album', 'camera'],
+        success: handleSuccess,
+        fail: handleFail
+      });
+    } else {
+      wx.chooseImage({
+        count: 1,
+        sourceType: ['album', 'camera'],
+        success: handleSuccess,
+        fail: handleFail
+      });
+    }
   },
 
   // 更新预估信息
   updateEstimate() {
+    // ① 测量中占位守卫：_measureTransparency 执行期间（最长 1.5s）transparentRatio 仍是旧图值/初始值，
+    // 此时预估区不应显示旧图珠数或「0 颗」。estimateMeasuring=true 期间统一展示「测量中…」，由 WXML 三分支渲染。
+    if (this.data.estimateMeasuring) {
+      this.setData({ 'estimateInfo.totalBeads': '测量中…', 'estimateInfo.size': '-' });
+      return;
+    }
     const { imageSize, beadSize, templateCols } = this.data;
     // 兜底：图片尺寸不可用（压缩失败且补取尺寸也失败的极端场景）时，
     // 不展示误导性的「0 颗」，改为占位符，避免用户误判生成结果为空。
@@ -384,6 +476,9 @@ Page({
       timer = setTimeout(() => done(0), timeoutMs);
 
       if (this._pageAlive === false) { done(0); return; }
+      // ③ 反向覆盖防护：若「生成进行中又选新图触发测量」(generating=true)，测量会重设同一个
+      // #offscreen-canvas，破坏正在进行的生成绘制。此处直接 done(0) 退回上界预估（安全，不触碰画布）。
+      if (this.data.generating) { done(0); return; }
       const query = wx.createSelectorQuery();
       query.select('#offscreen-canvas').fields({ node: true, size: true }).exec((res) => {
         if (this._pageAlive === false) { done(0); return; }
@@ -393,6 +488,10 @@ Page({
           const ctx = canvas.getContext('2d');
           const img = canvas.createImage();
           img.onload = () => {
+            // settled 早退（交叉审查验证时发现的微瑕疵）：超时兜底 done(0) 后 Promise 已终结，
+            // 迟到的 onload 若仍执行会白耗一次 1024² getImageData + 全像素扫描（恰逢模板生成分块
+            // 计算时会挤占主线程拖慢进度）；且重设 canvas.width 会破坏并发生成链的画布内容。
+            if (settled) return;
             if (this._pageAlive === false) { done(0); return; }
             try {
               // P1-2 修复：画布尺寸钳制到 ≤1024px（与 profile.pickColorAtPoint 的
@@ -437,13 +536,20 @@ Page({
     wx.showActionSheet({
       itemList: items,
       success: (res) => {
-        const selected = presets[res.tapIndex];
+        // 防御：tapIndex 越界/异常时 presets 可能取到 undefined（平台异常或 presets 与 items
+        // 不同步），setData 写入 undefined 会破坏 beadSize/currentSizeLabel 状态。判空后静默忽略。
+        const selected = presets[res && res.tapIndex];
+        if (!selected) return;
         this.setData({
           beadSize: selected.value,
           currentSizeLabel: selected.label
         });
         this.updateEstimate();
         this.savePrefs();
+      },
+      fail: () => {
+        // 用户取消选择（showActionSheet 取消会走 fail 回调）或调用失败：
+        // 静默不打扰（取消属用户主动放弃，无需提示；失败场景保持原选择不变）。
       }
     });
   },
@@ -516,14 +622,17 @@ Page({
 
   // ===== 核心：生成拼豆模板 =====
   generateTemplate() {
-    if (this.data.generating || !this.data.imagePath) return;
+    // ③ 互斥锁：透明占比测量期间（this._measuring=true）#offscreen-canvas 正被 _measureTransparency
+    // 的 img.onload 异步占用，此时拦截入口，避免重设 canvas 尺寸+绘制与测量互相覆盖
+    // （导致透明度占比算错或生成图被擦除）。
+    if (this.data.generating || this._measuring || !this.data.imagePath) return;
 
     this.setData({
       generating: true,
       progress: 0
     });
 
-    wx.showLoading({ title: '正在处理模板...', mask: true });
+    safeShowLoading({ title: '正在处理模板...', mask: true });
 
     // 使用离屏 Canvas 处理图片
     const query = wx.createSelectorQuery();
@@ -535,11 +644,15 @@ Page({
         // 复位 generating 并返回，避免对可能已销毁的页面 setData / 误跳转，
         // 也避免给一个即将被丢弃的图片赋值 img.src。
         if (this._pageAlive === false) {
-          wx.hideLoading();
+          safeHideLoading();
+          // 复位 generating 并返回：onHide（切 tab/退后台）后页面实例仍存活，不复位会导致
+          // 回页后入口守卫永久拦截、「制作中」卡死；onUnload 场景实例即将回收，
+          // setData 最坏产生一条无害告警，换取状态一致性是正确取舍。
+          this.setData({ generating: false });
           return;
         }
         if (!res[0] || !res[0].node) {
-          wx.hideLoading();
+          safeHideLoading();
           wx.showToast({ title: 'Canvas 初始化失败', icon: 'none' });
           this.setData({ generating: false });
           return;
@@ -565,7 +678,11 @@ Page({
           // "页面已卸载 setData" 告警或误跳转（把 template 页推到用户已离开的页面栈上）。
           // 入口先判页面存活：已死则仅 hideLoading 清理全局遮罩并直接返回，跳过一切页面操作。
           if (this._pageAlive === false) {
-            wx.hideLoading();
+            safeHideLoading();
+            // 复位 generating：图片异步加载期间切 tab/退后台后实例仍存活，不复位会导致
+            // 回页后入口守卫永久拦截、「制作中」卡死；onUnload 场景 setData 最坏产生
+            // 一条无害告警，换取状态一致性是正确取舍。
+            this.setData({ generating: false });
             return;
           }
           try {
@@ -588,7 +705,7 @@ Page({
               }
             );
 
-            wx.hideLoading();
+            safeHideLoading();
             this.setData({ generating: false });
 
             // 保存模板数据到全局，跳转到预览页
@@ -613,7 +730,7 @@ Page({
               });
             }
           } catch (err) {
-            wx.hideLoading();
+            safeHideLoading();
             this.setData({ generating: false });
             // 长生成期间页面已卸载/隐藏：静默放弃，不再对已死页面跳转或提示
             if (err && err.__cancel) return;
@@ -626,10 +743,14 @@ Page({
         img.onerror = () => {
           // 同 img.onload：页面已卸载/隐藏时不再对已死页面 setData，仅清理全局遮罩 + 提示。
           if (this._pageAlive === false) {
-            wx.hideLoading();
+            safeHideLoading();
+            // 复位 generating：与 img.onload 同理，页面隐藏后实例仍存活时不复位会导致
+            // 回页后入口守卫永久拦截、「制作中」卡死；onUnload 场景 setData 最坏产生
+            // 一条无害告警，换取状态一致性是正确取舍。
+            this.setData({ generating: false });
             return;
           }
-          wx.hideLoading();
+          safeHideLoading();
           this.setData({ generating: false });
           wx.showToast({ title: '图片加载失败', icon: 'none' });
         };
@@ -652,10 +773,15 @@ Page({
         const fs = wx.getFileSystemManager();
         // 以源文件真实扩展名命名，避免"扩展名与内容不符"
         // （如相机直出的 .jpg 字节被存成 .png → 后续按扩展名处理的工具会误判格式）。
-        // 源文件本身已是经 chooseMedia/压缩后的产物，扩展名与其真实格式一致。
+        // 说明（外部审查 #5）：chooseMedia/压缩产物多为无扩展名临时路径（wxfile://tmp_xxx），
+        // 无扩展名时回落默认 .png 属文件类型提示兜底——读取端（getImageInfo/预览）按真实内容
+        // 解码、不依赖扩展名，故「默认 .png 与内容不符」影响极小，仅作命名约定。
         const extMatch = rawPath.match(/\.([a-z0-9]+)$/i);
         const ext = extMatch ? extMatch[1].toLowerCase() : 'png';
-        const dest = wx.env.USER_DATA_PATH + '/history_source_' + Date.now() + '.' + ext;
+        // P3-4 修复：用随机后缀做唯一文件名（与下方 record.id 各自独立随机、互不关联），避免同毫秒
+        // 两次 saveToHistory 时 copyFileSync 覆盖前一条原图（记录 id 与文件名均因随机后缀而唯一）。
+        const recordId = Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+        const dest = wx.env.USER_DATA_PATH + '/history_source_' + recordId + '.' + ext;
         fs.copyFileSync(rawPath, dest);
         fs.accessSync(dest); // 确认复制成功
         sourceImage = dest;
@@ -690,8 +816,10 @@ Page({
     history.unshift(record);
     // 收集因超 MAX_HISTORY 或降级清理而需删除原图的记录（先不删，等写入成功再删，
     // 避免写入失败留下悬空引用：存储仍含该记录却已删除其原图文件）。
+    // 循环收敛：存量脏数据可能一次超限多条（历史曾被多条写入/旧 bug 只 pop 一条），
+    // 只 pop 一条在存量远超上限时永不收敛到 MAX_HISTORY（每次保存仅减 1）。
     const toUnlink = [];
-    if (history.length > MAX_HISTORY) {
+    while (history.length > MAX_HISTORY) {
       const popped = history.pop();
       if (isManagedHistorySource(popped && popped.sourceImage)) toUnlink.push(popped.sourceImage);
     }
@@ -757,7 +885,7 @@ Page({
   // 分享给朋友
   onShareAppMessage() {
     return {
-      title: '拼豆大师 - 上传图片一键转换拼豆模板',
+      title: '拼豆格子 - 上传图片一键转换拼豆模板',
       path: '/pages/index/index'
     };
   },
@@ -765,7 +893,7 @@ Page({
   // 分享到朋友圈
   onShareTimeline() {
     return {
-      title: '拼豆大师 - 上传图片一键转换拼豆模板',
+      title: '拼豆格子 - 上传图片一键转换拼豆模板',
       query: 'from=timeline'
     };
   }

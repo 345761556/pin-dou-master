@@ -117,9 +117,9 @@ ok('onHide 置 this._pageAlive = false（切换 tab 守护）',
 ok('onUnload 置 this._pageAlive = false（页面销毁守护）',
   /onUnload\(\)\s*\{[\s\S]{0,40}?this\._pageAlive\s*=\s*false/.test(jsSrc));
 ok('img.onload 入口判 this._pageAlive === false 并提前返回',
-  /img\.onload\s*=\s*(?:async\s+)?\(\)\s*=>\s*\{[\s\S]{0,600}?if\s*\(this\._pageAlive\s*===\s*false\)\s*\{[\s\S]{0,60}?wx\.hideLoading\(\);[\s\S]{0,40}?return;/.test(jsSrc));
+  /img\.onload\s*=\s*(?:async\s+)?\(\)\s*=>\s*\{[\s\S]{0,600}?if\s*\(this\._pageAlive\s*===\s*false\)\s*\{[\s\S]{0,120}?(?:safeHideLoading|wx\.hideLoading)\(\);[\s\S]{0,300}?return;/.test(jsSrc));
 ok('img.onerror 入口同样判 this._pageAlive === false 并提前返回',
-  /img\.onerror\s*=\s*\(\)\s*=>\s*\{[\s\S]{0,120}?if\s*\(this\._pageAlive\s*===\s*false\)\s*\{[\s\S]{0,60}?wx\.hideLoading\(\);[\s\S]{0,40}?return;/.test(jsSrc));
+  /img\.onerror\s*=\s*\(\)\s*=>\s*\{[\s\S]{0,150}?if\s*\(this\._pageAlive\s*===\s*false\)\s*\{[\s\S]{0,120}?(?:safeHideLoading|wx\.hideLoading)\(\);[\s\S]{0,300}?return;/.test(jsSrc));
 
 // ============ 运行时校验（真实加载并执行回调）============
 delete require.cache[indexJs];
@@ -174,8 +174,8 @@ pageObj._pageAlive = false;   // 模拟图片异步加载期间用户离开（ex
 await imageMock.onload();
 ok('未调用 wx.navigateTo / wx.redirectTo（杜绝误跳转）', navigateToCount === 0 && redirectToCount === 0);
 ok('未调用 saveToHistory（不写历史）', saveToHistoryCalled === 0);
-ok('onload 内未对已死页面 setData（无 generating:false 写回）',
-  setDataDuringOnload.every(o => o.generating !== false));
+ok('onload 内复位 generating:false（页面隐藏后实例仍存活，不复位会致回页后入口守卫永久拦截卡死）',
+  setDataDuringOnload.some(o => o.generating === false));
 ok('仍清理了全局遮罩 hideLoading（唯一副作用，安全）', hideLoadingCount === 1);
 ok('未弹 toast（对用户无感知、不误导）', showToastCount === 0);
 
@@ -184,7 +184,8 @@ setupGenerate(true);
 pageObj._pageAlive = false;   // 模拟图片异步加载期间用户离开
 await imageMock.onerror();
 ok('onerror 未调用 wx.navigateTo / wx.redirectTo', navigateToCount === 0 && redirectToCount === 0);
-ok('onerror 未对已死页面 setData', setDataDuringOnload.every(o => o.generating !== false));
+ok('onerror 同样复位 generating:false（防回页后入口守卫永久拦截卡死，设计取舍）',
+  setDataDuringOnload.some(o => o.generating === false));
 ok('onerror 仅 hideLoading 清理遮罩，无 toast', hideLoadingCount === 1 && showToastCount === 0);
 
 console.log('\n结果: ' + pass + ' 通过, ' + fail + ' 失败');

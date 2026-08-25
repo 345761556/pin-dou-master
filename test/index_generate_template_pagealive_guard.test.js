@@ -79,7 +79,7 @@ setTimeout(() => {
   ok('页面已卸载时 exec 回调清理全局遮罩（hideLoading）', hideLoadingCalled);
   ok('页面已卸载时未触发误跳转 navigateTo', !navigateToCalled);
   ok('页面已卸载时未触发误跳转 redirectTo', !redirectToCalled);
-  ok('页面已卸载时未对已死页面 setData（无 generating 写回，遵守存活守护契约）', !setDataCalls.some(o => o.generating === false));
+  ok('页面已卸载时复位 generating:false（不复位会致回页后入口守卫永久拦截卡死，设计取舍）', setDataCalls.some(o => o.generating === false));
   ok('页面已卸载时未走未守护的 canvas 检查分支（无 Canvas 初始化失败 toast）', !toastCalled);
 
   console.log(`\n${passed} passed, ${failed} failed`);

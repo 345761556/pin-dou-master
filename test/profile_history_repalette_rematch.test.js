@@ -6,7 +6,7 @@
 //   3) onPaletteChange 的「已查询结果重匹配」guard 用 pickedColor.r !== undefined 判断，
 //      历史项缺 r/g/b → guard 跳过 → 切色卡后 matchedHex/name/id 仍是旧色卡结果，误导用户。
 // 修复：历史项保存 r/g/b；showHistoryItem 一并写入 pickedColor；onPaletteChange 据此重匹配。
-// 运行：node test/profile_history_repalette_rematch.test.js
+// 运行：node test/profile_history_repalette_rematch.test.js,
 const path = require('path');
 const fs = require('fs');
 const Module = require('module');
@@ -25,7 +25,7 @@ const fakeSecCheck = {
   checkImageByPath: async () => ({ pass: true, suggest: 'pass', skipped: false }),
   blockMessage: (r, def) => def
 };
-// 两个色卡：P1（旧卡）/ P2（新卡），各自一个代表色，便于验证重匹配是否真的跑了
+// 两个色卡：P1（旧卡）/ P2（新卡），各自一个代表色，便于验证重匹配是否真的跑了,
 const fakeColorLib = {
   getCurrentColors: () => ([{ id: 'P1C', name: 'P1色', hex: '#AABBCC', r: 170, g: 187, b: 204 }]),
   switchPalette: (key) => {
@@ -35,10 +35,10 @@ const fakeColorLib = {
 };
 const fakeBeadEngine = {
   initPalette: (colors) => colors,
-  // 命中逻辑：永远返回当前色卡的「第一个色」——这样切卡后若重匹配发生，matchedHex 必变为该卡色
-  matchToPalette: (r, g, b, palette) => (palette && palette[0]
+  // 命中逻辑：永远返回当前色卡的「第一个色」——这样切卡后若重匹配发生，matchedHex 必变为该卡色,
+  matchToPalette: (r, g, b, palette) => (palette && palette[0])
     ? { hex: palette[0].hex, name: palette[0].name, id: palette[0].id, r, g, b }
-    : { hex: '#000000', name: '无', id: 'NONE', r, g, b }),
+    : { hex: '#000000', name: '无', id: 'NONE', r, g, b },
   calcDeltaE: () => 2.3,
   renderTemplate: () => {}
 };
@@ -83,11 +83,11 @@ function makeCtx(init) {
   });
 }
 
-// 模拟「取色后存入历史」的一次性数据（等价于 pickColorAtPoint 成功路径写入的 history 项）
+// 模拟「取色后存入历史」的一次性数据（等价于 pickColorAtPoint 成功路径写入的 history 项）,
 const historyItem = {
   originalHex: '#0A141E',
-  r: 10, g: 20, b: 30,          // 真实 RGB
-  matchedHex: '#AABBCC',        // 旧卡 P1 的匹配结果
+  r: 10, g: 20, b: 30,          // 真实 RGB,
+  matchedHex: '#AABBCC',        // 旧卡 P1 的匹配结果,
   name: 'P1色',
   id: 'P1C'
 };
@@ -95,13 +95,13 @@ const historyItem = {
 // ---- 场景 A：点历史项 → 切到新色卡 P2，应重匹配为 P2 的色号 ----
 {
   const ctx = makeCtx({ pickerHistory: [historyItem] });
-  // 1) 用户点击历史区某一项
+  // 1) 用户点击历史区某一项,
   ctx.showHistoryItem({ currentTarget: { dataset: { index: 0 } } });
   ok('场景A：showHistoryItem 后 pickedColor.r 已写入（非 undefined）', ctx.data.pickedColor.r === 10);
   ok('场景A：showHistoryItem 后 pickedColor.g/b 正确', ctx.data.pickedColor.g === 20 && ctx.data.pickedColor.b === 30);
   ok('场景A：初始显示仍是旧卡匹配（P1色 / #AABBCC）', ctx.data.pickedColor.matchedHex === '#AABBCC' && ctx.data.pickedColor.name === 'P1色');
 
-  // 2) 用户切换色卡到 P2
+  // 2) 用户切换色卡到 P2,
   ctx.onPaletteChange({ detail: { key: 'P2' } });
   ok('场景A：切卡后触发重匹配 → matchedHex 更新为新卡 P2 色号（#112233）', ctx.data.pickedColor.matchedHex === '#112233');
   ok('场景A：切卡后 name/id 同步更新为 P2色 / P2C', ctx.data.pickedColor.name === 'P2色' && ctx.data.pickedColor.id === 'P2C');
@@ -120,3 +120,4 @@ const historyItem = {
 
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);
+

@@ -10,6 +10,26 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const Module = require('module');
+
+// scoped require 拦截：profile.js 引用的 utils/util 用可观测桩替换，
+// 让 compressImageIfNeeded 返回成功结果（P1-2 修复后压缩失败走 fail-closed，
+// 原测试依赖"压缩失败回退原图"的旧行为，已不符合新语义）。
+const origRequire = Module.prototype.require;
+const PROFILE_MARK = 'pages/profile/profile.js';
+Module.prototype.require = function (id) {
+  if (id.indexOf('utils/util') !== -1 && this.filename && this.filename.replace(/\\/g, '/').indexOf(PROFILE_MARK) !== -1) {
+    return {
+      validateImageFile: async () => true,
+      compressImageIfNeeded: async (p) => ({ tempFilePath: 'compressed://' + p, width: 100, height: 100 }),
+      removeFileIfExists: () => {},
+      CONSTANTS: { DEFAULT_IMAGE_SIZE: 800 },
+      safeShowLoading: () => {},
+      safeHideLoading: () => {}
+    };
+  }
+  return origRequire.apply(this, arguments);
+};
 
 // ---- 1) 活跃 WXML 不应含废弃 API，必须含现代 API ----
 const wxmlPath = path.join(__dirname, '..', 'pages', 'profile', 'profile.wxml');

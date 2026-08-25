@@ -100,7 +100,7 @@ ok('updateEstimate 尺寸不可用时置占位符（不 return 静默保留 0）
 ok('updateEstimate 兜底同时校验 width 与 height',
   /if \(!imageSize \|\| !imageSize\.width \|\| !imageSize\.height\)/.test(jsSrc));
 ok('WXML 对占位符做条件渲染（不显示「预估约 0 颗」）',
-  /wx:if="\{\{estimateInfo\.totalBeads !== '-'\}\}"/.test(wxml) &&
+  /wx:elif="\{\{estimateInfo\.totalBeads !== '-'\}\}"/.test(wxml) &&
   /wx:else>预估 <text class="highlight">尺寸未知<\/text>/.test(wxml));
 ok('正常路径 WXML 展示逻辑未变（预估约 + 尺寸约）',
   /预估约 <text class="highlight">\{\{estimateInfo\.totalBeads\}\}<\/text> 颗拼豆/.test(wxml) &&

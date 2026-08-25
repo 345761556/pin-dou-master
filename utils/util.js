@@ -60,8 +60,9 @@ const MAX_ROWS = CONSTANTS.MAX_ROWS;
  * 格式化毫米为厘米，并保留合理精度
  */
 function formatMm(mm) {
-  // 防御：确保输入是有效数字
-  if (typeof mm !== 'number' || isNaN(mm) || mm < 0) {
+  // 防御：确保输入是有效数字。用 !isFinite 而非 isNaN —— isNaN(Infinity)===false，
+  // 会放行 Infinity 走到下方 (Infinity/10).toFixed(1) 显示「Infinity cm」。
+  if (typeof mm !== 'number' || !isFinite(mm) || mm < 0) {
     return '-';
   }
   if (mm >= 1000) {
@@ -145,6 +146,13 @@ function saveImageToAlbum(filePath) {
       reject(new Error('invalid_file_path'));
       return;
     }
+    // P3-7 修复：协议层校验。当前调用方（canvasToImage / template.js saveTemplate）均经过 isValidFilePath 校验，
+    // 但 saveImageToAlbum 作为独立导出的公共函数，若被未来调用方以任意字符串传入（如用户输入的路径），
+    // wx.saveImageToPhotosAlbum 可能抛出未预期错误。在此增加协议校验，与 canvasToImage 同款防御。
+    if (!isValidFilePath(filePath)) {
+      reject(new Error('invalid_file_path'));
+      return;
+    }
 
     // 检查文件是否存在（防御性检查）
     try {
@@ -169,7 +177,11 @@ function saveImageToAlbum(filePath) {
     function checkAlbumPermission() {
       wx.getSetting({
         success: function(settingRes) {
-          const hasAuth = settingRes.authSetting['scope.writePhotosAlbum'];
+          // 判空防御：平台异常返回缺 authSetting 字段时，直接取值会在 wx 回调内抛
+          // TypeError → Promise 永不 settle → 调用方 loading 永久悬挂
+          // （与下方 showModal fail 守卫同一教义）。缺失视为「未授权也未拒绝」，走 doSave()。
+          const authSetting = (settingRes && settingRes.authSetting) || {};
+          const hasAuth = authSetting['scope.writePhotosAlbum'];
 
           if (hasAuth === false) {
             // 用户曾明确拒绝过，引导去设置页
@@ -182,7 +194,9 @@ function saveImageToAlbum(filePath) {
                 if (modalRes.confirm) {
                   wx.openSetting({
                     success: function(openRes) {
-                      if (openRes.authSetting['scope.writePhotosAlbum']) {
+                      // 同款判空防御：openSetting 异常返回缺 authSetting 时不得抛 TypeError
+                      const openAuthSetting = (openRes && openRes.authSetting) || {};
+                      if (openAuthSetting['scope.writePhotosAlbum']) {
                         doSave();
                       } else {
                         reject(new Error('权限未开启'));
@@ -223,13 +237,16 @@ function saveImageToAlbum(filePath) {
           const errMsg = (err && (err.errMsg || '')) || '';
           const msgLower = errMsg.toLowerCase();
 
-          log.error('[saveImageToAlbum] save failed:', errMsg);
-
-          // 用户取消了权限对话框
+          // 用户主动取消（saveImageToPhotosAlbum:fail cancel / showModal 取消）：正常交互，
+          // 非故障——记 info 级即可，避免「用户取消保存」被误报为 error 刷日志。
           if (msgLower.indexOf('cancel') >= 0) {
+            log.info('[saveImageToAlbum] user cancelled:', errMsg);
             reject(new Error('user_cancel'));
             return;
           }
+
+          // 其余（权限拒绝/路径无效/系统异常等）才是真失败，记 error 级
+          log.error('[saveImageToAlbum] save failed:', errMsg);
 
           // 权限被拒绝（包括正式版的隐私相关拒绝）
           if (msgLower.indexOf('auth deny') >= 0 ||
@@ -356,26 +373,53 @@ function compressImageIfNeeded(imagePath, maxSide = 800) {
         return;
       }
 
-      // 计算缩放比例
+      // 计算缩放比例。目标尺寸下限钳到 1：极端长宽比（如 1×6000 图，maxSide=800）下
+      // Math.round(1 * (800/6000)) = Math.round(0.133) = 0，0 尺寸传给 compressImage/canvas
+      // 会失败/异常（外部审查：压缩目标尺寸可为 0）。钳到 1 保证压缩产物至少 1px 有效。
       const ratio = maxSide / longestSide;
-      const newWidth = Math.round(width * ratio);
-      const newHeight = Math.round(height * ratio);
+      const newWidth = Math.max(1, Math.round(width * ratio));
+      const newHeight = Math.max(1, Math.round(height * ratio));
 
       // ⚡ Medium-6 性能：不透明 JPG/JPEG 走原生 wx.compressImage
       // 原生压缩在端内以更优路径执行（主线程零 canvas 重绘、零 PNG 编码），远快于下方 canvas 路径；
       // 且 JPEG 本无 alpha，不存在「透明→黑底」语义冲突，可安全走原生。
       // 其余格式（含潜在透明的 PNG/WebP 等）一律走 canvas PNG 路径保 alpha。
-      const ext = (imagePath.split('.').pop() || '').toLowerCase();
-      const isOpaqueJpeg = ext === 'jpg' || ext === 'jpeg';
+      // ⚠️ 格式判断优先用 getImageInfo 返回的 type 字段：chooseMedia/chooseImage 的临时路径
+      // （wxfile://tmp_xxx / http://tmp/xxx）通常【无扩展名】，按路径 split('.') 取到的 ext
+      // 为空或随机串 → isOpaqueJpeg 恒 false → JPEG 原生压缩优化名存实亡。getImageInfo 的
+      // type（'jpg'/'png' 等）来自真实解码结果，与扩展名路径互补。
+      const pathExt = (imagePath.split('.').pop() || '').toLowerCase();
+      const infoType = (info && info.type) ? String(info.type).toLowerCase() : '';
+      const isOpaqueJpeg =
+        (pathExt === 'jpg' || pathExt === 'jpeg') ||
+        (infoType === 'jpg' || infoType === 'jpeg');
       if (isOpaqueJpeg && typeof wx.compressImage === 'function') {
-        wx.compressImage({
-          src: imagePath,
-          quality: 80,
-          compressedWidth: newWidth, // 等比缩放至 maxSide 内，与 canvas 路径尺寸口径一致
-          success: (r) => resolve({ tempFilePath: r.tempFilePath, width: newWidth, height: newHeight }),
-          // 原生压缩失败（极端机型/权限）→ 回退 canvas PNG，保 alpha 安全网
-          fail: () => fallbackCanvas()
-        });
+        // 超时守护：wx.compressImage 无原生 timeout 参数，极端机型可能挂起且不触发
+        // success/fail 回调 → 调用方永久 await。超时按失败处理走 fallbackCanvas()，
+        // 与下方 fail 分支同路径（与 getImageInfoWithTimeout 的 10s 兜底口径一致）。
+        runWithTimeout(
+          (onOk, onErr) => {
+            wx.compressImage({
+              src: imagePath,
+              quality: 80,
+              compressedWidth: newWidth, // 等比缩放至 maxSide 内，与 canvas 路径尺寸口径一致
+              success: onOk,
+              fail: onErr
+            });
+          },
+          ASYNC_TIMEOUT_MS,
+          'image_compress_timeout'
+        ).then((r) => {
+            // 第八轮审查 #15：compressedWidth/compressedHeight 参数需基础库 2.26.0+，
+            // 低版本会静默忽略（仅按 quality 压缩、保留原尺寸），此时声明的 newWidth/newHeight
+            // 与实际输出不符 → 预估颗数/slider 列数上限口径漂移。回读真实尺寸兜底；
+            // 回读失败（极端机型）再退回计算值，不因校验引入新的失败路径。
+            getImageInfoWithTimeout(r.tempFilePath)
+              .then((real) => resolve({ tempFilePath: r.tempFilePath, width: real.width, height: real.height }))
+              .catch(() => resolve({ tempFilePath: r.tempFilePath, width: newWidth, height: newHeight }));
+          },
+          // 原生压缩失败或超时（极端机型/权限/挂起不回调）→ 回退 canvas PNG，保 alpha 安全网
+          () => fallbackCanvas());
         return;
       }
       fallbackCanvas();
@@ -408,11 +452,48 @@ function compressImageIfNeeded(imagePath, maxSide = 800) {
             const ctx = canvas.getContext('2d');
 
             const img = canvas.createImage();
+
+            // 超时守护（与 getImageInfoWithTimeout 同款 done 防重入教义）：
+            // img.onload/img.onerror/wx.canvasToTempFilePath 的回调均无原生 timeout，
+            // 极端机型可能挂起且不触发 → 调用方永久 await。解码与导出两阶段各自享有
+            // ASYNC_TIMEOUT_MS（10s）预算：onload 先到则 clearTimeout 并为导出阶段重启计时；
+            // 超时 reject(image_compress_timeout)——两个调用方 catch 后都有安全回退
+            // （profile 回退原图、index 引导重试），reject 是安全方向；
+            // settled 标志拦截超时后迟到的回调，定时器在成功/失败/超时三路径均清理防泄漏。
+            let settled = false;
+            let timer = null;
+            const clearTimer = () => { if (timer) { clearTimeout(timer); timer = null; } };
+            const finishResolve = (val) => {
+              if (settled) return;
+              settled = true;
+              clearTimer();
+              resolve(val);
+            };
+            const finishReject = (err) => {
+              if (settled) return;
+              settled = true;
+              clearTimer();
+              reject(err);
+            };
+
             img.onload = () => {
+              if (settled) return; // 超时后迟到的 onload：拦截，不再触碰已 settle 的 Promise
+              try {
+                ctx.drawImage(img, 0, 0, newWidth, newHeight);
+              } catch (e) {
+                // 绘制异常（画布节点被销毁/状态异常）→ 走超时同款 reject（安全方向），
+                // 避免在 onload 内产生未捕获异常。与 profile.js pickColorAtPoint 的
+                // drawImage try/catch 口径一致；即便此处不 catch，10s 定时器也会最终
+                // reject 兜底 + onUnhandledRejection 记日志（不会悬挂），但口径应统一。
+                finishReject(new Error('image_compress_timeout'));
+                return;
+              }
               // 输出 PNG 而非 JPG：JPG 无 alpha 通道，会把透明区域压成黑色底，
               // 导致透明背景 LOGO/贴纸类图片出现黑块，且与「透明=空位」(BUG-6) 语义冲突；
               // 保留 alpha 后下游 generateTemplate 才能正确把透明区当作空位。
-              ctx.drawImage(img, 0, 0, newWidth, newHeight);
+              // 导出阶段独立享有 10s 超时预算：重置计时器后再发起导出
+              clearTimer();
+              timer = setTimeout(() => finishReject(new Error('image_compress_timeout')), ASYNC_TIMEOUT_MS);
               wx.canvasToTempFilePath({
                 canvas,
                 x: 0, y: 0,
@@ -422,13 +503,16 @@ function compressImageIfNeeded(imagePath, maxSide = 800) {
                 destHeight: newHeight,
                 fileType: 'png',
                 quality: 0.9,
-                success: (r) => resolve({ tempFilePath: r.tempFilePath, width: newWidth, height: newHeight }),
+                success: (r) => finishResolve({ tempFilePath: r.tempFilePath, width: newWidth, height: newHeight }),
                 // 情况二：canvas 导出失败，同上，明确 reject 而非静默回退超限原图。
-                fail: () => reject(new Error('image_compress_failed'))
+                fail: () => finishReject(new Error('image_compress_failed'))
               });
             };
             // 情况二：图片解码失败，同上，明确 reject 而非静默回退超限原图。
-            img.onerror = () => reject(new Error('image_compress_failed'));
+            img.onerror = () => finishReject(new Error('image_compress_failed'));
+
+            // 解码阶段超时兜底：img.src 赋值后挂 10s 定时器，onload/onerror 先到则清理
+            timer = setTimeout(() => finishReject(new Error('image_compress_timeout')), ASYNC_TIMEOUT_MS);
             img.src = imagePath;
           });
       }
@@ -448,11 +532,18 @@ function compressImageIfNeeded(imagePath, maxSide = 800) {
  * @returns {{cols:number, rows:number}}
  */
 function clampTemplateSize(cols, rows, maxPixels = CONSTANTS.MAX_PIXELS, maxRows = 0, aspect = 0) {
-  // 防御：确保输入是有效正整数
-  cols = Math.max(1, Math.floor(cols) || 1);
-  rows = Math.max(1, Math.floor(rows) || 1);
-  maxPixels = Math.max(1, Math.floor(maxPixels) || 8000);
-  if (maxRows > 0) maxRows = Math.max(1, Math.floor(maxRows));
+  // 防御：确保输入是有效正整数。⚠️ 不能用 `Math.floor(x) || 1` 挡 Infinity/NaN——
+  // Math.floor(Infinity)=Infinity 是 truthy，`|| 1` 不兜底，Infinity 会一路传播破坏不变式。
+  // 用 isFinite 显式判定：非有限数/≤0 → 回落默认值。
+  const norm = (v, def) => {
+    if (typeof v !== 'number' || !isFinite(v)) return def;
+    const f = Math.floor(v);
+    return f > 0 ? f : def;
+  };
+  cols = norm(cols, 1);
+  rows = norm(rows, 1);
+  maxPixels = norm(maxPixels, 8000);
+  if (maxRows > 0) maxRows = norm(maxRows, 1);
 
   // 1) 像素乘积钳制（sqrt 缩放 + floor，与实际生成算法一致）
   if (cols * rows > maxPixels) {
@@ -464,6 +555,18 @@ function clampTemplateSize(cols, rows, maxPixels = CONSTANTS.MAX_PIXELS, maxRows
       rows = 1;
       cols = Math.min(cols, Math.floor(maxPixels));
     }
+    // 极端宽高比守卫：ratio > maxPixels 时 sqrt 钳制失效（floor 后为 0 被钳成 1），
+    // rows=floor(cols*ratio) 可能仍超上限（如 1×100000，maxPixels=8000 → 1×8000+），
+    // 此处强制收敛保证「cols×rows ≤ maxPixels」不变式（与步骤 2 复查同教义）
+    if (cols * rows > maxPixels) {
+      rows = Math.max(1, Math.floor(maxPixels / cols));
+    }
+    // 镜像守卫：极端横图（ratio << 1，如 100000×1）时 sqrt 联动算出的 rows=floor(cols*ratio)
+    // 被 Math.max(1,...) 抬回 1、cols 保留 sqrt 结果，乘积可能仍超上限（如 20×1, maxPixels=4 → 8×1）。
+    // rows 已收敛，此处只缩 cols，同款保证不变式。
+    if (cols * rows > maxPixels) {
+      cols = Math.max(1, Math.floor(maxPixels / rows));
+    }
   }
 
   // 2) 最大行数钳制（与实际生成算法一致：限制行数后按宽高比重算列数，并复查像素上限）
@@ -472,6 +575,9 @@ function clampTemplateSize(cols, rows, maxPixels = CONSTANTS.MAX_PIXELS, maxRows
     if (aspect > 0) {
       cols = Math.max(1, Math.round(rows / aspect));
     } else {
+      // P3-1 修复：aspect=0 且 maxRows>0 会静默将 cols 坍缩为 1，用户看到 1×N 的"模板"极难排查根因。
+      // 现有 3 处生产调用均正确传入 aspect，此警告仅在异常/误调用时触发，不增加正常路径日志。
+      console.warn('[clampTemplateSize] aspect 未传入或为 0，cols 将坍缩为 1。请检查调用方是否遗漏 aspect 参数。');
       cols = 1;
     }
     // 再次校验像素上限：此时 rows 已被 maxRows 固定，乘积要 ≤ maxPixels 只能缩 cols。
@@ -506,6 +612,60 @@ function getTemplateHistory() {
     log.warn('读取 template_history 失败，已降级为空数组:', e);
     return [];
   }
+}
+
+/**
+ * 异步操作统一超时阈值：wx.compressImage / 图片解码 / canvasToTempFilePath 均无原生
+ * timeout 参数，极端机型可能挂起且不触发任何回调 → 调用方永久 await。
+ * 口径与 getImageInfoWithTimeout 一致（10s）。测试可通过环境变量
+ * UTIL_ASYNC_TIMEOUT_MS 注入缩短阈值（小程序运行时无 process，需防御式读取）。
+ */
+const ASYNC_TIMEOUT_MS = (function () {
+  try {
+    const raw = (typeof process !== 'undefined' && process.env) ? process.env.UTIL_ASYNC_TIMEOUT_MS : null;
+    const v = parseInt(raw, 10);
+    if (!isNaN(v) && v > 0) return v;
+  } catch (e) { /* 环境不可用时静默回退默认值 */ }
+  return 10000;
+})();
+
+/**
+ * 通用异步超时包装（与 getImageInfoWithTimeout 同款 done 防重入教义）：
+ * 把「success/fail 回调」风格的 wx API 包装为带超时的 Promise。
+ * 回调先到 → clearTimeout 正常 settle；超时未到 → reject(timeoutTag)；
+ * 超时后迟到的回调被 done 标志拦截；定时器在成功/失败/超时三路径均清理，避免泄漏。
+ * @param {Function} setupFn - (onOk, onErr) => void：内部发起 wx 调用并把回调接到两个 op 上
+ * @param {number} [timeoutMs=ASYNC_TIMEOUT_MS] - 超时毫秒数
+ * @param {string} [timeoutTag='async_timeout'] - 超时时 reject 的错误信息
+ * @returns {Promise<*>}
+ */
+function runWithTimeout(setupFn, timeoutMs = ASYNC_TIMEOUT_MS, timeoutTag = 'async_timeout') {
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      reject(new Error(timeoutTag));
+    }, timeoutMs);
+    const onOk = function(result) {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const onErr = function(err) {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      reject(err instanceof Error ? err : new Error(err || timeoutTag));
+    };
+    try {
+      setupFn(onOk, onErr);
+    } catch (e) {
+      // 同步抛错（如低版本基础库 API 缺失）也必须终结 Promise，避免悬挂
+      onErr(e);
+    }
+  });
 }
 
 /**
@@ -558,42 +718,72 @@ function validateImageFile(tempFile) {
     return Promise.resolve(false);
   }
 
-  // 同步校验：文件大小
-  if (tempFile.size > CONSTANTS.MAX_IMAGE_FILE_SIZE) {
-    wx.showToast({ title: '图片不能超过10MB', icon: 'none' });
-    return Promise.resolve(false);
+  // 同步校验：文件大小。size 缺失（部分降级 API/平台不返回 size 字段，如 chooseImage 的
+  // tempFilePaths 分支）时用 fs.getFileInfo 补取真实字节数——否则 `undefined > 10MB` 恒 false，
+  // 10MB 闸门被静默绕过（外部审查 #6；下游压缩 + secCheck 7MB 守卫虽兜底，口径应 fail-closed）。
+  // 补取也失败（wxfile://tmp 路径 stat 异常）才放行，依赖下游兜底。
+  function checkSizeOk(declaredSize) {
+    return new Promise((resolve) => {
+      if (typeof declaredSize === 'number') {
+        if (declaredSize > CONSTANTS.MAX_IMAGE_FILE_SIZE) {
+          wx.showToast({ title: '图片不能超过10MB', icon: 'none' });
+          resolve(false);
+          return;
+        }
+        resolve(true);
+        return;
+      }
+      try {
+        wx.getFileSystemManager().getFileInfo({
+          filePath: tempFile.tempFilePath,
+          success: (res) => {
+            if (res && typeof res.size === 'number' && res.size > CONSTANTS.MAX_IMAGE_FILE_SIZE) {
+              wx.showToast({ title: '图片不能超过10MB', icon: 'none' });
+              resolve(false);
+            } else resolve(true);
+          },
+          fail: () => resolve(true) // 无法获取大小（罕见）：放行，依赖下游兜底
+        });
+      } catch (e) {
+        resolve(true);
+      }
+    });
   }
+  // 文件大小校验（含缺失补取）完成后才进入 getImageInfo 校验（异步串行，避免并行竞态）
+  return checkSizeOk(tempFile.size).then((sizeOk) => {
+    if (!sizeOk) return false;
 
-  // 说明：此处刻意不做「基于临时路径扩展名」的格式校验。
-  // chooseMedia 在部分平台/基础库返回的临时路径不带扩展名（wxfile://tmp_xxx / http://tmp/xxx），
-  // 若按 split('.') 取扩展名会把这类合法图片全部拒绝——与项目自身 BUG-20 兜底
-  // （index.js:441 无扩展名回退 png）自相矛盾，且会导致核心选图流程在真机断裂。
-  // 真实格式校验由下方 getImageInfo().type 白名单完成（已覆盖 GIF 伪装 .png 等场景），
-  // 扩展名检查纯属冗余且脆弱，故移除。
+    // 说明：此处刻意不做「基于临时路径扩展名」的格式校验。
+    // chooseMedia 在部分平台/基础库返回的临时路径不带扩展名（wxfile://tmp_xxx / http://tmp/xxx），
+    // 若按 split('.') 取扩展名会把这类合法图片全部拒绝——与项目自身 BUG-20 兜底
+    // （index.js:441 无扩展名回退 png）自相矛盾，且会导致核心选图流程在真机断裂。
+    // 真实格式校验由下方 getImageInfo().type 白名单完成（已覆盖 GIF 伪装 .png 等场景），
+    // 扩展名检查纯属冗余且脆弱，故移除。
 
-  // 异步校验：图片尺寸 + 真实格式（带超时：模拟器上 getImageInfo 可能挂起不回调，
-  // 超时按 fail-closed 拒绝，避免框架层裸 "Error: timeout"）
-  return new Promise((resolve) => {
-    getImageInfoWithTimeout(tempFile.tempFilePath).then((info) => {
-      // 真实格式校验（防御 GIF 等重命名为 .png 的情况；基于文件内容而非路径扩展名）
-      const realType = (info.type || '').toLowerCase();
-      // 'unknown' 为微信无法判定图片格式（合法但库不识别，官方 type 有效值之一），按无法验证处理放行；
-      // 仅当真实已知格式且不在白名单时才拒绝，避免误拒合法图片（见 L9 修复）。常量本身不动。
-      if (realType && realType !== 'unknown' && !CONSTANTS.VALID_IMAGE_TYPES.includes(realType)) {
-        wx.showToast({ title: '不支持 ' + realType.toUpperCase() + ' 格式', icon: 'none' });
+    // 异步校验：图片尺寸 + 真实格式（带超时：模拟器上 getImageInfo 可能挂起不回调，
+    // 超时按 fail-closed 拒绝，避免框架层裸 "Error: timeout"）
+    return new Promise((resolve) => {
+      getImageInfoWithTimeout(tempFile.tempFilePath).then((info) => {
+        // 真实格式校验（防御 GIF 等重命名为 .png 的情况；基于文件内容而非路径扩展名）
+        const realType = (info.type || '').toLowerCase();
+        // 'unknown' 为微信无法判定图片格式（合法但库不识别，官方 type 有效值之一），按无法验证处理放行；
+        // 仅当真实已知格式且不在白名单时才拒绝，避免误拒合法图片（见 L9 修复）。常量本身不动。
+        if (realType && realType !== 'unknown' && !CONSTANTS.VALID_IMAGE_TYPES.includes(realType)) {
+          wx.showToast({ title: '不支持 ' + realType.toUpperCase() + ' 格式', icon: 'none' });
+          resolve(false);
+          return;
+        }
+        if (info.width > CONSTANTS.MAX_IMAGE_DIMENSION || info.height > CONSTANTS.MAX_IMAGE_DIMENSION) {
+          wx.showToast({ title: '图片尺寸不能超过6000px', icon: 'none' });
+          resolve(false);
+          return;
+        }
+        resolve(true);
+      }, () => {
+        // 读取失败或超时：校验闸门 fail-closed —— 无法验证即拒绝。
+        wx.showToast({ title: '图片读取失败，请重试', icon: 'none' });
         resolve(false);
-        return;
-      }
-      if (info.width > CONSTANTS.MAX_IMAGE_DIMENSION || info.height > CONSTANTS.MAX_IMAGE_DIMENSION) {
-        wx.showToast({ title: '图片尺寸不能超过6000px', icon: 'none' });
-        resolve(false);
-        return;
-      }
-      resolve(true);
-    }, () => {
-      // 读取失败或超时：校验闸门 fail-closed —— 无法验证即拒绝。
-      wx.showToast({ title: '图片读取失败，请重试', icon: 'none' });
-      resolve(false);
+      });
     });
   });
 }
@@ -634,6 +824,10 @@ function removeFileIfExists(filePath) {
  *   （globalData.shareImagePath 指向最新一份），其余旧文件在此删除。
  * - history_source_*.png/jpg/...：历史「对照原图」副本。仅清掉**未被任何历史记录引用**
  *   的孤儿（存储写入失败遗留 / 历史被清空后残留）；仍在使用的对照原图不删。
+ * ⚠️ 调用时机契约（外部审查 #11）：本函数【只在 onLaunch 启动时同步调用】（app.js:161）。
+ *   启动瞬间用户不可能已进入导出流程（保存/分享至少需要进入页面并操作数秒），
+ *   「清理进行中的 bead_export_*」竞态窗口不存在；若未来新增 onShow/定时调用点，
+ *   必须评估与导出流程（saveTemplate/shareTemplate 写 bead_export_ 与 bead_share_ 文件）的重叠。
  * @param {object} [opts]
  * @param {string} [opts.keepSharePath] - 需保留的分享图路径（不删这一份）
  * @returns {number} 实际删除的文件数量
@@ -688,6 +882,21 @@ function gcBeadTempFiles(opts) {
   return removed;
 }
 
+/**
+ * F3 提取的 showLoading/hideLoading 守卫辅助（公共版，utils/util.js 单一真源）。
+ * 真机 API 恒存在，守卫本为测试桩兼容而加——此前各页面部分用内联 typeof、
+ * 部分用裸调，不一致会让测试桩只 stub 部分 wx API 时莫名 TypeError。
+ * 统一从本模块导出，调用点不再逐处手写守卫；新增页面直接 import 即可，
+ * 避免「复制旧模式到新页面退化为裸调」的回归。
+ * @param {object} opts 传给 wx.showLoading 的参数
+ */
+function safeShowLoading(opts) {
+  if (typeof wx !== 'undefined' && typeof wx.showLoading === 'function') wx.showLoading(opts);
+}
+function safeHideLoading() {
+  if (typeof wx !== 'undefined' && typeof wx.hideLoading === 'function') wx.hideLoading();
+}
+
 module.exports = {
   // 常量
   CONSTANTS,
@@ -710,6 +919,11 @@ module.exports = {
   getTemplateHistory,
   validateImageFile,
   getImageInfoWithTimeout,
+  runWithTimeout,
   removeFileIfExists,
-  gcBeadTempFiles
+  gcBeadTempFiles,
+
+  // F3：showLoading/hideLoading 守卫辅助统一出口，三页共用单一真源
+  safeShowLoading,
+  safeHideLoading
 };

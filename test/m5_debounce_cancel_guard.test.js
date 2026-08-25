@@ -23,11 +23,11 @@ ok('debounce 返回包装器含 cancel 方法',
 ok('debounce 返回带 cancel 的 wrapped 函数（而非裸函数）',
   /return\s+wrapped/.test(utilJs));
 
-// 2) 静态：index.js onUnload 调用 cancel
+// 2) 静态：index.js onUnload 调用 cancel（真机修复后带 typeof 判型守卫，正则放宽）
 ok('index.js onUnload 取消 debouncedOnColsChange',
-  /onUnload\(\)[\s\S]{0,200}?debouncedOnColsChange\.cancel\(\)/.test(indexJs));
+  /onUnload\(\)[\s\S]{0,600}?debouncedOnColsChange\.cancel\(\)/.test(indexJs));
 ok('index.js onUnload 取消 debouncedOnColorCountChange',
-  /onUnload\(\)[\s\S]{0,200}?debouncedOnColorCountChange\.cancel\(\)/.test(indexJs));
+  /onUnload\(\)[\s\S]{0,600}?debouncedOnColorCountChange\.cancel\(\)/.test(indexJs));
 
 // 3) 静态：onUnload 仍保留 _pageAlive=false
 ok('onUnload 仍置 this._pageAlive=false（img.onload 守护不变）',

@@ -275,7 +275,6 @@ App({
   _initCloud() {
     try {
       if (typeof wx.cloud === 'undefined' || typeof wx.cloud.init !== 'function') {
-        this.globalData.cloudAvailable = false;
         log.info('[cloud] 当前基础库不支持云开发，内容安全检测通道不可用（生产环境将 fail-closed 拦截）');
         return;
       }
@@ -285,10 +284,8 @@ App({
       // 本项目 init 阶段不依赖任何用户身份归属标记（内容安全 secCheck 通道无需按用户归因），
       // 故关闭 traceUser，避免在用户同意前于云日志中产生可识别用户的追踪记录。
       wx.cloud.init();
-      this.globalData.cloudAvailable = true;
       log.info('[cloud] 云开发初始化成功，内容安全检测通道可用');
     } catch (e) {
-      this.globalData.cloudAvailable = false;
       log.warn('[cloud] 云开发初始化失败，内容安全检测通道不可用（生产环境将 fail-closed 拦截）:', e);
     }
   },
@@ -472,8 +469,6 @@ App({
     // 布局信息就绪标记：_initSystemInfo 完成（成功或兜底）后置 true，
     // 页面可通过 getSystemInfoReady(callback) 订阅等待（防御未来改回异步时的竞态）
     systemInfoReady: false,
-    // 云开发可用标记：_initCloud 执行后置位（内容安全检测通道）
-    cloudAvailable: false,
     beadSize: CONSTANTS.BEAD_SIZE.DEFAULT,
     beadType: CONSTANTS.BEAD_TYPE.DEFAULT,
     selectedPalette: CONSTANTS.DEFAULT_PALETTE,  // 默认色卡

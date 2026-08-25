@@ -23,7 +23,7 @@ const fakeUtil = {
   getTemplateHistory: () => [],
   getImageInfoWithTimeout: () => Promise.resolve({ width: 100, height: 100, type: 'png' }),
   removeFileIfExists: () => {},
-  debounce: (fn) => fn,
+  debounce: (fn) => Object.assign(fn, { cancel: () => {} }),
   CONSTANTS: {
     DEFAULT_IMAGE_SIZE: 800,
     MAX_COLS: 120,
@@ -34,7 +34,10 @@ const fakeUtil = {
   },
   MAX_HISTORY: 50,
   MAX_PIXELS: 8000,
-  MAX_ROWS: 120
+  MAX_ROWS: 120,
+  // F3：index.js 已统一从 utils/util 解构 safeShowLoading/safeHideLoading，桩必须提供
+  safeShowLoading: () => {},
+  safeHideLoading: () => {}
 };
 const fakeSecCheck = {
   checkImageByPath: async (p, opts) => {
@@ -62,7 +65,10 @@ let chooseMediaSuccessCb = null;
 let chooseMediaCalls = 0;
 global.wx = {
   chooseMedia: (opts) => { chooseMediaCalls++; chooseMediaSuccessCb = opts.success; },
-  showToast: (o) => { toasts.push(o && o.title); }
+  showToast: (o) => { toasts.push(o && o.title); },
+  showLoading: () => {},
+  hideLoading: () => {},
+  createSelectorQuery: () => ({ select: () => ({ boundingClientRect: () => ({}), fields: () => ({}) }), exec: () => {} })
 };
 global.Page = (o) => { pageObj = o; };
 let pageObj = null;
@@ -73,8 +79,10 @@ function makeCtx() {
     data: {},
     setData(d) { Object.assign(ctx.data, d); },
     // 轻量化：透明统计与预估更新在连点守卫测试中不是被测对象
+    _measuring: false,
     _measureTransparency: async () => 0,
-    updateEstimate() {}
+    updateEstimate() {},
+    debouncedOnColsChange: { cancel: () => {} }
   });
   return ctx;
 }
@@ -90,10 +98,10 @@ function ok(name, cond) {
 
 // ============ 静态断言：源码守卫结构 ============
 const src = fs.readFileSync(path.join(__dirname, '..', 'pages', 'index', 'index.js'), 'utf8');
-ok('静态: chooseImage success 回调入口含 _pickerBusy 守卫',
-  /success:\s*async\s*\(res\)\s*=>\s*\{[\s\S]*?if\s*\(this\._pickerBusy\)\s*return;[\s\S]*?this\._pickerBusy\s*=\s*true;/.test(src));
-ok('静态: chooseImage 处理链尾部 finally 复位 _pickerBusy=false',
-  /finally\s*\{\s*this\._pickerBusy\s*=\s*false;\s*\}/.test(src));
+ok('静态: chooseImage 函数入口含 _pickerBusy 前置守卫（防连点）',
+  /async chooseImage\(\)[\s\S]*?if\s*\(this\._pickerBusy\)\s*return;[\s\S]*?this\._pickerBusy\s*=\s*true;/.test(src));
+ok('静态: chooseImage finally 块调用 releaseBusy 复位 _pickerBusy',
+  /finally\s*\{\s*releaseBusy\(\)/.test(src));
 
 (async () => {
   // ============ 行为断言：连点并发守卫 ============
@@ -101,16 +109,17 @@ ok('静态: chooseImage 处理链尾部 finally 复位 _pickerBusy=false',
   const ctx = makeCtx();
   ctx.chooseImage(); // 第一次触发，捕获 chooseMedia success
   const s1 = chooseMediaSuccessCb;
-  ctx.chooseImage(); // 连点第二次，同样捕获 success
-  const s2 = chooseMediaSuccessCb;
-  ok('A. 连点两次均触发 chooseMedia（第二次仍在处理中被守卫拦截）', chooseMediaCalls === 2);
+  ctx.chooseImage(); // 连点第二次，入口 _pickerBusy 守卫直接 return，不触发 chooseMedia
+  const s2 = chooseMediaSuccessCb; // 第二次被拦截，s2 与 s1 是同一个回调
+  ok('A. 第一次触发 chooseMedia，第二次被入口守卫拦截（chooseMediaCalls === 1）', chooseMediaCalls === 1);
+  ok('A. 第二次调用 chooseImage 被入口守卫拦截，未设置新 success 回调（s2 === s1）', s2 === s1);
 
   const p1 = s1({ tempFiles: [{ tempFilePath: 'wxfile://tmp/img_A.png', size: 100, fileType: 'image' }] });
-  const p2 = s2({ tempFiles: [{ tempFilePath: 'wxfile://tmp/img_B.png', size: 100, fileType: 'image' }] });
-  await Promise.all([p1, p2]);
+  // 第二次调用被入口守卫拦截，s2 === s1，无需再次调用；等待第一条链完成
+  await p1;
 
-  ok('A. 并发：第二次 success 被 _pickerBusy 守卫忽略，secCheck 仅调用 1 次', secCheckCalls.length === 1);
-  ok('A. 并发：仅首次图片 A 进入检测链路', secCheckCalls[0] && secCheckCalls[0].path.indexOf('img_A') !== -1);
+  ok('A. 入口守卫有效：仅首次图片 A 进入 secCheck 链路（secCheck 调用 1 次）', secCheckCalls.length === 1);
+  ok('A. 仅首次图片 A 进入检测链路', secCheckCalls[0] && secCheckCalls[0].path.indexOf('img_A') !== -1);
   ok('A. 守卫正确复位：完成后 _pickerBusy 恢复 false', ctx._pickerBusy === false);
 
   // ============ 行为断言：复位后可再次选择（不卡死） ============

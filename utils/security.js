@@ -8,6 +8,12 @@
 // 直接引用会抛 ReferenceError，故先 typeof 判断。
 const IS_RELEASE = typeof __wxConfig === 'undefined' || !__wxConfig.envVersion || __wxConfig.envVersion === 'release';
 
+// P3-8 修复：微信运行时 wx.env.USER_DATA_PATH 必存在；Node 单测环境 wx 未定义，直接引用抛 ReferenceError。
+// 模块级 typeof 守卫，非微信环境下引用空串。注意：空串前缀匹配 startsWith('') 恒为 true，
+// 会使 isValidFilePath 在 Node 单测环境对任意字符串返回 true——仅影响单测，微信端 WX_USER_DATA_PATH
+// 恒非空、行为正常，故不加额外分支（保持运行时零开销、语义清晰）。
+const WX_USER_DATA_PATH = (typeof wx !== 'undefined' && wx.env && wx.env.USER_DATA_PATH) ? wx.env.USER_DATA_PATH : '';
+
 /**
  * 安全日志输出
  * 生产环境自动屏蔽非必要的详细日志，仅保留关键错误
@@ -36,6 +42,14 @@ const log = {
   }
 };
 
+// 脱敏正则提升为模块级常量（第八轮审查 #12）：
+// 原先四个字面量写在函数体内，每次调用都新建 RegExp 对象；日志路径虽低频，
+// 但提升零风险（String.replace 对 /g 正则每次从 0 开始且结束后复位 lastIndex，无状态残留问题）。
+const RE_WXFILE_TMP = /wxfile:\/\/[^'"\s,)]+/g;
+const RE_HTTP_URL = /(https?:\/\/[^'"\s,)]+)/g;
+const RE_LOCAL_TMP_DIR = /\/tmp\/[^'"\s,)]+/g;
+const RE_USER_DATA_PATH = /USER_DATA_PATH[^'"]*/g;
+
 /**
  * 日志脱敏：替换路径、Token 等敏感信息
  * 支持 Error / string 以及普通对象、数组的递归脱敏（保留结构便于排错）。
@@ -49,21 +63,21 @@ function sanitizeForLog(val, depth = 0) {
   if (typeof val === 'string') {
     let result = val;
     // 微信临时文件（含设备特征）：wxfile://tmp_xxx / wxfile://store_xxx 等
-    result = result.replace(/wxfile:\/\/[^'"\s,)]+/g, 'wxfile://***');
+    result = result.replace(RE_WXFILE_TMP, 'wxfile://***');
     // http(s):// 协议路径：
     //   - host 含 "." 视为真实远程域名（如 cdn.example.com），不泄露设备信息，保留
     //   - host 不含 "."（如 tmp / store / usr / cache）是微信本地沙盒路径，
     //     其真实值即 wx.env.USER_DATA_PATH 等内容（如 http://usr/...、http://store/...），
     //     不会以 "USER_DATA_PATH" 字面量或 "/tmp/" 形式出现，故按 host 是否含 "." 判定后整段脱敏
-    result = result.replace(/(https?:\/\/[^'"\s,)]+)/g, (m) => {
+    result = result.replace(RE_HTTP_URL, (m) => {
       const proto = m.startsWith('https://') ? 'https://' : 'http://';
       const host = m.slice(proto.length).split('/')[0];
       return host.indexOf('.') !== -1 ? m : proto + '***';
     });
     // 其它本地临时目录（开发者工具 / 部分系统）
-    result = result.replace(/\/tmp\/[^'"\s,)]+/g, '/tmp/***');
+    result = result.replace(RE_LOCAL_TMP_DIR, '/tmp/***');
     // 防御性：日志中若直接出现 USER_DATA_PATH 字面量（代码引用，非真实路径）一并脱敏
-    result = result.replace(/USER_DATA_PATH[^'"]*/g, 'USER_DATA_PATH/***');
+    result = result.replace(RE_USER_DATA_PATH, 'USER_DATA_PATH/***');
     return result;
   }
   // 数字 / 布尔 / undefined / null / function / symbol 等无需脱敏，原样返回
@@ -96,7 +110,7 @@ function isValidFilePath(filePath) {
   // 禁止路径遍历
   if (filePath.indexOf('..') >= 0) return false;
   // 微信临时文件路径格式校验
-  if (filePath.startsWith('wxfile://') || filePath.startsWith(wx.env.USER_DATA_PATH)) {
+  if (filePath.startsWith('wxfile://') || filePath.startsWith(WX_USER_DATA_PATH)) {
     return true;
   }
   // http(s):// 路径须校验 host 含 "."（与 isRemoteImageUrl 口径一致）：
@@ -177,6 +191,15 @@ function registerGlobalErrorHandler() {
   if (typeof wx.onMemoryWarning === 'function') {
     wx.onMemoryWarning(() => {
       log.warn('内存不足警告');
+    });
+  }
+
+  // 未处理的 Promise 拒绝（基础库 2.10.0+）：生产环境浮动 Promise 拒绝若零日志，
+  // 会掩盖异步链路故障（H1 教义：绝不静默吞错）。与 onError 同口径脱敏记录。
+  if (typeof wx.onUnhandledRejection === 'function') {
+    wx.onUnhandledRejection((res) => {
+      const reason = (res && res.reason) || '';
+      log.error('未处理的 Promise 拒绝:', typeof reason === 'object' ? JSON.stringify(reason).substring(0, 200) : String(reason).substring(0, 200));
     });
   }
 }

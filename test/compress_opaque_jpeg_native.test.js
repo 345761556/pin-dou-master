@@ -17,7 +17,11 @@ function makeMockWx() {
   const state = { compressCalls: [], queryCalls: 0 };
   const wx = {
     env: { USER_DATA_PATH: 'x' },
-    getImageInfo: ({ src, success }) => success({ width: 4000, height: 3000 }),
+    // 原始图为 4000×3000；原生压缩产物按 compressedWidth=800 等比回读为 800×600
+    // （模拟第八轮审查 #15 的「压缩后回读真实尺寸」逻辑：getImageInfo 按路径区分尺寸）
+    getImageInfo: ({ src, success }) => success(
+      src === 'wxfile://native_compressed.jpg' ? { width: 800, height: 600 } : { width: 4000, height: 3000 }
+    ),
     compressImage: (o) => { state.compressCalls.push(o); o.success({ tempFilePath: 'wxfile://native_compressed.jpg' }); },
     createSelectorQuery: () => {
       state.queryCalls++;

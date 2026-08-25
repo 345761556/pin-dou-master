@@ -49,12 +49,17 @@ Component({
         '合计: ' + this.data.totalBeads + ' 颗',
         '建议购买: ' + suggestBeads + ' 颗 (含10%备用)',
         '',
-        '由「拼豆大师」小程序生成'
+        '由「拼豆格子」小程序生成'
       );
 
+      // 长度安全（优化建议 2）：合法上限 MAX_COLOR_COUNT=50 色 × 每条约 50 字节 ≈ 2.5KB，
+      // 远低于微信剪贴板数据上限（约 1MB 级），无需截断保护——此处留注释供后人理解为何不截断。
       wx.setClipboardData({
         data: lines.join('\n'),
-        success: () => wx.showToast({ title: '清单已复制', icon: 'success' })
+        success: () => wx.showToast({ title: '清单已复制', icon: 'success' }),
+        // 复制失败（系统剪贴板异常/权限拒绝）不静默：仅成功才 toast 会让失败看起来「没反应」，
+        // 用户可能重复点击。失败明确提示可重试。
+        fail: () => wx.showToast({ title: '复制失败，请重试', icon: 'none' })
       });
     }
   }

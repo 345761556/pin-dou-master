@@ -21,7 +21,7 @@
 //      体验版(trial)/正式版(release)/无法判定环境时强制 fail-closed（真实用户环境防线必须生效）。
 //      拦截时按失败类型给出区分提示，避免把「图片过大 / 限频 / 服务暂不可用」误提示成「含违规信息」。
 
-const { log } = require('./security');
+const { log, isValidFilePath } = require('./security');
 
 // 云函数名称（须与 cloudfunctions/ 目录名一致）
 const SEC_CHECK_FN = 'secCheck';
@@ -221,6 +221,10 @@ function callSecCheckFn(fileID, scene) {
  *   - 悬空语义：若 cancel() 在 Promise 尚未 settle 时调用，Promise 静默悬空（不再 resolve/reject）。
  *           这是有意为之——调用方已在 finally 中取消 await，悬空 Promise 无副作用、可被 GC，
  *           且不再触发任何 callFunction（配额/网络不再浪费）。
+ *   - 当前边界（P3-6 核实）：checkImageByPath 内部仅在 `await promise` 已 settle 后的 finally 调 cancel，
+ *           此时轮询已结束、cancel 恒为 no-op（仅作「异常未 settle」的防御性兜底）；页面
+ *           onUnload/onHide 的主动取消尚未接入（需调用方显式持有 cancel 并触发），故「页面
+ *           卸载立即中止轮询」目前未实现——弃置上传仍会轮询至预算耗尽后 fail-closed。
  *
  * @param {string} traceId - 提交时返回的 trace_id
  * @param {number} [maxAttempts=20] - 最大轮询次数；实测 5-10s 出结果；缩短可在推送异常
@@ -353,7 +357,9 @@ function checkImageByPath(filePath, options = {}) {
 
   return new Promise((resolve) => {
     // 前置守卫：路径合法性 + 云通道可用性，任一不满足即按 fail-closed 拦截
-    if (!filePath || typeof filePath !== 'string') {
+    // P3-2 修复：补 isValidFilePath 校验（与 saveImageToAlbum/canvasToImage/compressImageIfNeeded 同口径）。
+    // 此前仅判空串/非字符串，路径遍历等非法路径靠 getFileInfo 失败间接兜底；显式校验更早 fail-closed。
+    if (!filePath || typeof filePath !== 'string' || !isValidFilePath(filePath)) {
       resolve(resolveFail('invalid_path', BLOCK_TYPE.ERROR));
       return;
     }

@@ -1,5 +1,5 @@
 {
-  "description": "拼豆大师 - 图片转拼豆模板工具",
+  "description": "拼豆格子 - 图片转拼豆模板工具",
   "packOptions": {
     "ignore": [
       { "type": "folder", "value": "_backup_before_ui_redesign" },
@@ -57,7 +57,7 @@
   "cloudfunctionRoot": "cloudfunctions/",
   "libVersion": "3.15.2",
   "appid": "wx33440d447b366a9d",
-  "projectname": "拼豆大师",
+  "projectname": "拼豆格子",
   "condition": {},
   "simulatorPluginLibVersion": {},
   "editorSetting": {}

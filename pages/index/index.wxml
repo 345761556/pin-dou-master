@@ -142,8 +142,12 @@
 
   <!-- 预估信息 -->
   <view class="estimate-info" wx:if="{{imagePath && !generating}}">
+    <!-- ① 测量中占位：展示「测量中…」，避免测量期显示旧图珠数或「0 颗」 -->
+    <block wx:if="{{estimateInfo.totalBeads === '测量中…'}}">
+      <text class="estimate-text">预估 <text class="highlight">测量中…</text></text>
+    </block>
     <!-- 正常路径：展示预估数量与尺寸（与修复前一致） -->
-    <block wx:if="{{estimateInfo.totalBeads !== '-'}}">
+    <block wx:elif="{{estimateInfo.totalBeads !== '-'}}">
       <text class="estimate-text">预估约 <text class="highlight">{{estimateInfo.totalBeads}}</text> 颗拼豆</text>
       <text class="estimate-divider">|</text>
       <text class="estimate-text">尺寸约 <text class="highlight">{{estimateInfo.size}}</text></text>

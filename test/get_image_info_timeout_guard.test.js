@@ -28,7 +28,7 @@ ok('已导出 getImageInfoWithTimeout', /getImageInfoWithTimeout,/.test(utilSrc)
 console.log('静态校验（上传链路三处调用点）:');
 // validateImageFile 使用带超时封装（不再裸调 wx.getImageInfo）
 const vif = utilSrc.indexOf('function validateImageFile');
-const vifSeg = utilSrc.slice(vif, vif + 1200);
+const vifSeg = utilSrc.slice(vif, vif + 2200);
 ok('validateImageFile 使用 getImageInfoWithTimeout',
    /getImageInfoWithTimeout\(tempFile\.tempFilePath\)/.test(vifSeg));
 ok('validateImageFile 不再裸调 wx.getImageInfo',

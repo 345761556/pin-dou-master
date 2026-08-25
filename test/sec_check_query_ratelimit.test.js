@@ -93,7 +93,7 @@ const fakeCloud = {
   DYNAMIC_CURRENT_ENV: 'test-env',
   init: () => {},
   getWXContext: () => ({ OPENID: currentOpenid }),
-  getTempFileURL: async () => ({ fileList: [{ tempFileURL: 'https://example.com/sec_check/x.png' }] }),
+  getTempFileURL: async () => ({ fileList: [{ tempFileURL: 'https://example.com/sec_check/x.png', status: 0 }] }),
   deleteFile: async () => ({}),
   openapi: { security: { mediaCheckAsync: async () => ({ trace_id: 'trace-123' }) } },
   database: () => db
@@ -189,7 +189,10 @@ ok('P2-6: 内存兜底为独立 Map（_memQueryRateStore，不与 submit 兜底�
   const qeDoc = dbRows.find((x) => x._id === 'qe');
   ok('并发爆发后 qCount 收敛到 600（无超额自增）', qeDoc && qeDoc.qCount === 600);
 
-  // 7) 数据库不可用 → 降级独立内存兜底，不崩溃且放行；同进程告警去重只打一次
+  // 7) 数据库不可用 → query 内存兜底放行，结果读取因 DB 抛错返回 errcode -10（P3-10 修复：
+  //   原 .catch(() => ({data:null})) 掩盖了 DB 故障，修复后不再吞异常，外层 catch 返回 -10。
+  //   语义上仍为 fail-closed（不泄露他人结果，与 L2 readPendingDoc 同口径），
+  //   前端轮询收到 -10 后 fail-closed 拦截，与"未出结果"等价。
   reset('qf'); dbThrow = true;
   let errLogs = [];
   const origErr = console.error;
@@ -197,7 +200,8 @@ ok('P2-6: 内存兜底为独立 Map（_memQueryRateStore，不与 submit 兜底�
   r = await callQuery();
   const r2 = await callQuery();
   console.error = origErr;
-  ok('数据库不可用 → query 内存兜底放行（errcode 0）', r && r.errcode === 0 && r2 && r2.errcode === 0);
+  ok('数据库不可用 → query 内存兜底限频放行但结果读取返回 errcode -10（P3-10：DB 故障不再吞错）',
+    r && r.errcode === -10 && r2 && r2.errcode === -10);
   ok('降级告警打印一次（query 独立去重标记，提示单实例内存兜底）',
     errLogs.filter((m) => m.includes('query 限频数据库不可用')).length === 1);
   dbThrow = false;

@@ -25,6 +25,10 @@ Page({
     wx.showShareMenu({ menus: ['shareAppMessage', 'shareTimeline'] });
   },
 
+  // ⚠️ 契约（第十六轮审查 R5 固化）：onShow 的 changed 判断依赖 historyVersion
+  // 「每次变更必然改变值」——三处写入点（本页 deleteTemplate / index saveToHistory /
+  // profile clearHistory）均为 (v||0)+1 严格自增。勿改为取模/随机值等可能撞值的方案，
+  // 否则 !== 判断会漏报变更、5s 防抖窗口内读到陈旧列表。
   onShow() {
     // 5 秒内不重复加载，避免从 template 页返回时频繁读 Storage；
     // 但若历史数据已变更（生成新模板 / 清空历史 / 删除记录），版本号自增，必须立即刷新，
@@ -62,7 +66,7 @@ Page({
       const date = new Date(item.date);
       const isValidDate = !isNaN(date.getTime());
       const dateLabel = isValidDate
-        ? `${date.getMonth() + 1}/${date.getDate()} ${date.getHours()}:${String(date.getMinutes()).padStart(2, '0')}`
+        ? `${date.getMonth() + 1}/${date.getDate()} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
         : '-';
 
       // 格式化尺寸（与下方 totalBeads/colorCount 一致走钳制值：
@@ -95,9 +99,18 @@ Page({
   viewTemplate(e) {
     // 防快速连点触发重复 navigateTo（route 竞态：routeDone webviewId not found）
     if (this._viewNavBusy) return;
-    const index = e.currentTarget.dataset.index;
+    const dataset = e.currentTarget.dataset || {};
     const history = getTemplateHistory();
-    const item = history[index];
+    // 按 id 定位（与 deleteTemplate 口径统一）：列表渲染与 storage 数据在极小窗口下可能错位
+    // （如 onShow 刷新前删除/其它页面改写过 history），按 id 取记录不受索引位移影响。
+    // 兼容兜底：无 dataset.id（旧调用方/测试直调）时回落按 index 取。
+    let item;
+    if (dataset.id != null) {
+      const idStr = String(dataset.id);
+      item = history.find(h => String(h.id) === idStr);
+    } else if (dataset.index != null) {
+      item = history[Number(dataset.index)];
+    }
 
     if (!item) return;
 
@@ -122,7 +135,10 @@ Page({
         // 避免 template 页顶部信息栏显示异常大数/非法尺寸
         totalBeads: clampDisplayNumber(item.totalBeads, DISPLAY_MAX_BEADS),
         colorCount: clampDisplayNumber(item.colorCount, DISPLAY_MAX_BEADS),
-        materialList: item.materialList,
+        // 其余展示字段都钳制了，materialList 漏了 Array.isArray：脏记录若是对象/字符串，
+        // template 页 `(materialList || []).length` 会拿字符串长度/对象 length 参与图例
+        // 高度计算（异常大图例）。统一收敛为数组，与其它字段同口径。
+        materialList: Array.isArray(item.materialList) ? item.materialList : [],
         physicalWidth: clampDisplayNumber(item.physicalWidth, DISPLAY_MAX_MM),
         physicalHeight: clampDisplayNumber(item.physicalHeight, DISPLAY_MAX_MM),
         beadSize: clampDisplayNumber(item.beadSize, DISPLAY_MAX_MM),
@@ -193,7 +209,16 @@ Page({
           if (app && app.globalData) {
             app.globalData.historyVersion = (app.globalData.historyVersion || 0) + 1;
           }
-          this.loadHistory();
+          // P2-1 修复：loadHistory 内部 getTemplateHistory/setData 在存储损坏/页面已销毁时可能抛错；
+          // showModal success 回调的异步上下文无外层 try-catch，须在此显式兜底，
+          // 否则未捕获异常 → 用户无反馈、版本号已自增、列表陈旧。
+          try {
+            this.loadHistory();
+          } catch (e) {
+            log.warn('删除后刷新历史记录失败:', e);
+            wx.showToast({ title: '刷新失败，请稍后重试', icon: 'none' });
+            return;
+          }
           wx.showToast({ title: '已删除', icon: 'success' });
         }
       }
@@ -208,7 +233,7 @@ Page({
   // 分享给朋友
   onShareAppMessage() {
     return {
-      title: '拼豆大师 - 上传图片一键转换拼豆模板',
+      title: '拼豆格子 - 上传图片一键转换拼豆模板',
       path: '/pages/index/index'
     };
   },
@@ -216,7 +241,7 @@ Page({
   // 分享到朋友圈
   onShareTimeline() {
     return {
-      title: '拼豆大师 - 上传图片一键转换拼豆模板',
+      title: '拼豆格子 - 上传图片一键转换拼豆模板',
       query: 'from=gallery'
     };
   }

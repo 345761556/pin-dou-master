@@ -1,7 +1,7 @@
 // pages/template/template.js - 模板预览与材料清单页
 const app = getApp();
 const beadEngine = require('../../utils/beadEngine');
-const { formatNumber, formatMm, calcPercent, saveImageToAlbum, canvasToImage, debounce, removeFileIfExists, clampDisplayNumber } = require('../../utils/util');
+const { formatNumber, formatMm, calcPercent, saveImageToAlbum, canvasToImage, debounce, removeFileIfExists, clampDisplayNumber, safeShowLoading, safeHideLoading } = require('../../utils/util');
 // 安全工具：路径合法性校验（防路径遍历等注入）+ 统一脱敏日志
 const { isValidFilePath, log } = require('../../utils/security');
 
@@ -65,6 +65,9 @@ Page({
     _zoomTimer: null
   },
 
+  // onLoad(options) 的 options 为微信导航参数签名（必须保留形参），但本页数据源是
+  // app.globalData.currentTemplate（由 gallery.viewTemplate 写入），不消费 URL 参数——
+  // 刻意忽略调用方传入的 cols/rows/total，避免「传了参数但实际用 globalData」的双数据源困惑。
   onLoad(options) {
     // 启用分享：右上角「...」菜单显示「发送给朋友」与「分享到朋友圈」
     wx.showShareMenu({ menus: ['shareAppMessage', 'shareTimeline'] });
@@ -78,12 +81,19 @@ Page({
     // 双重防御：即使 globalData 被意外写入非法值，也能在此兜住
     const template = templateData && templateData.template;
     if (!templateData || !Array.isArray(template) || !template.length || !Array.isArray(template[0])) {
+      // 标记无效数据：onShareAppMessage/onShareTimeline 据此返回兜底标题，
+      // 避免 1.5s 返回前用户触发分享时读到 data.cols/rows=0 分享出「0×0」标题。
+      this._invalidData = true;
       wx.showToast({ title: '模板数据无效', icon: 'none' });
       // 定时器须跟踪并在 onUnload 清理（route 竞态修复）：若用户 1.5s 内手动返回，
       // 未清理的定时器会对已卸载页面再发 navigateBack → "routeDone webviewId not found"。
       this._invalidDataTimer = setTimeout(() => {
         this._invalidDataTimer = null;
-        wx.navigateBack();
+        wx.navigateBack({
+          // 兜底：页面栈只剩本页（如从首页直接进入且历史为空）时 navigateBack 失败，
+          // 必须切换回首页 tabBar 页，否则用户卡在空白页无法操作。
+          fail: () => wx.switchTab({ url: '/pages/index/index' })
+        });
       }, 1500);
       return;
     }
@@ -109,6 +119,11 @@ Page({
     // 避免脏 count=1e20 算出 percentText="500000000000000000%" 超长串与异常占比）
     const safeMaterialList = Array.isArray(templateData.materialList) ? templateData.materialList : [];
     const materialList = safeMaterialList.map(item => {
+      // P2-2 修复：materialList 元素级判空（与 material-list.js / gallery.js 的判空口径对齐）。
+      // 历史脏数据（数组含 null/undefined 元素）时 item.count 会抛 TypeError → onLoad 中断白屏。
+      if (!item || typeof item !== 'object') {
+        return { count: 0, percent: 0, percentText: '0%' };
+      }
       const safeCount = clampDisplayNumber(item.count, 20000);
       // P3-a 修复：percent 语义恒 ≤100%，包 Math.min 封顶与 gallery.js 同口径
       // （脏 totalBeads 偏小时 calcPercent 可算出 >100%，避免色条/文案越界）
@@ -167,6 +182,10 @@ Page({
     }
     this._templateData = null;
     this._destroyed = true;   // 标记页面已销毁，异步导出链（_generateExportImage）据此提前中止
+    // 优化建议 3：显式释放缓存的导出 canvas node（Medium-5 复用缓存）。
+    // 页面卸载后实例本会被销毁、引用自然失效，但显式置 null 与清理 _zoomTimer/_invalidDataTimer
+    // 同口径，避免未来平台若对页面实例做复用（页签名/能力进化）时出现隐蔽脏引用。
+    this._exportCanvasNode = null;
     // 清除跨页模板态，明确 lifecycle，避免下次进入时误读上次的 currentTemplate
     // （仅清 currentTemplate；share/source 由下次 onLoad 的 resetTemplateState 统一清理）
     app.resetTemplateState({ clearCurrentTemplate: true, clearShareFile: false, clearSource: false });
@@ -181,6 +200,10 @@ Page({
       .select('#template-canvas')
       .fields({ node: true, size: true })
       .exec((res) => {
+        // 页面存活守卫（与 _generateExportImage 的 _destroyed 守卫同源）：exec 回调为异步，
+        // 可能晚于 onUnload 才执行。页面已销毁时直接返回，避免对已 detach 的 canvas node
+        // 绘制/取 context、或对已销毁页面 setData（触发「渲染异常」误报）。
+        if (this._destroyed) return;
         if (!res[0] || !res[0].node) { log.warn('[template] renderCanvas canvas node not found'); return; }
         try {
         const canvas = res[0].node;
@@ -447,6 +470,12 @@ Page({
     return new Promise((resolve, reject) => {
       const maxRetries = 3;
       const attempt = (retryCount) => {
+        // P3-5 修复：页面已卸载（onUnload 置 _destroyed）时不再对已 detach 的节点发查询，立即 reject。
+        // 否则重试定时器（50+100+200ms）会在卸载后继续空跑最多 3 次。
+        if (this._destroyed) {
+          reject(new Error('page destroyed'));
+          return;
+        }
         wx.createSelectorQuery()
           .select('#export-canvas')
           .fields({ node: true, size: true })
@@ -556,11 +585,11 @@ Page({
     let stablePath = null;
 
     try {
-      wx.showLoading({ title: '处理图片中...', mask: true });
+      safeShowLoading({ title: '处理图片中...', mask: true });
 
       const templateData = this._templateData;
       if (!templateData) {
-        wx.hideLoading();
+        safeHideLoading();
         wx.showToast({ title: '模板数据无效', icon: 'none' });
         return;
       }
@@ -606,12 +635,18 @@ Page({
       // 导出图已存入相册，本地中间副本（bead_export_*.png）即可删除，避免 USER_DATA_PATH 配额累积
       removeFileIfExists(stablePath);
 
-      wx.hideLoading();
+      safeHideLoading();
       wx.showToast({ title: '已保存到相册', icon: 'success' });
       log.info('[saveTemplate] save success');
 
     } catch (e) {
-      wx.hideLoading();
+      safeHideLoading();
+      // ② 用户已离开页面（onUnload 置 _destroyed，主动放弃导出）：_generateExportImage 抛 'page destroyed'
+      // 属预期中止，不在已切走的页面弹「保存失败」modal/toast；中间副本若有残留则静默清理避免孤儿文件。
+      if (this._destroyed) {
+        if (typeof stablePath !== 'undefined' && stablePath) removeFileIfExists(stablePath);
+        return;
+      }
       // ⚠️ 失败清理：若已持久化导出副本（stablePath 已赋值）但后续保存相册失败，
       // 必须回收该 1-4MB 中间副本（bead_export_*.png），否则权限被拒/用户取消导致
       // 同会话反复重试都重新生成并累积，直到重启才被 gcBeadTempFiles 兜底清掉，
@@ -620,14 +655,20 @@ Page({
       if (stablePath) removeFileIfExists(stablePath);
       const errMsg = (e && (e.errMsg || e.message || String(e))) || '';
       const errStr = String(e);
+
+      // 用户主动取消（saveImageToPhotosAlbum:fail cancel）：正常交互，不弹引导 toast、
+      // 不记 error（避免「取消保存」被误报为故障刷日志）——中间副本已在上方清理。
+      if (errStr.indexOf('user_cancel') >= 0 || errMsg.indexOf('user_cancel') >= 0) {
+        log.info('[saveTemplate] user cancelled save to album');
+        return;
+      }
+
       log.error('[saveTemplate] failed, full error:', e);
       log.error('[saveTemplate] error message:', errMsg);
       log.error('[saveTemplate] error string:', errStr);
 
       // 根据错误类型给出不同提示
-      if (errStr.indexOf('user_cancel') >= 0 || errMsg.indexOf('user_cancel') >= 0) {
-        wx.showToast({ title: '请允许保存到相册', icon: 'none', duration: 2500 });
-      } else if (errStr.indexOf('auth_deny') >= 0 || errMsg.indexOf('auth_deny') >= 0) {
+      if (errStr.indexOf('auth_deny') >= 0 || errMsg.indexOf('auth_deny') >= 0) {
         wx.showToast({ title: '请允许保存到相册', icon: 'none', duration: 2500 });
       } else if (errStr.indexOf('图片持久化失败') >= 0 || errMsg.indexOf('图片持久化失败') >= 0) {
         wx.showToast({ title: '图片保存失败，请重试', icon: 'none', duration: 2500 });
@@ -670,11 +711,11 @@ Page({
     }
     this._shareBusy = true;
     try {
-      wx.showLoading({ title: '制作分享图...', mask: true });
+      safeShowLoading({ title: '制作分享图...', mask: true });
 
       const templateData = this._templateData;
       if (!templateData) {
-        wx.hideLoading();
+        safeHideLoading();
         wx.showToast({ title: '制作分享图失败', icon: 'none' });
         return;
       }
@@ -718,7 +759,7 @@ Page({
       if (oldSharePath) removeFileIfExists(oldSharePath);
       app.globalData.shareImagePath = newSharePath;
 
-      wx.hideLoading();
+      safeHideLoading();
       wx.showShareMenu({ withShareTicket: true, menus: ['shareAppMessage', 'shareTimeline'] });
       wx.showModal({
         title: '分享模板',
@@ -728,7 +769,13 @@ Page({
       });
 
     } catch (e) {
-      wx.hideLoading();
+      safeHideLoading();
+      // ② 用户已离开页面（onUnload 置 _destroyed，主动放弃导出）：_generateExportImage 抛 'page destroyed'
+      // 属预期中止，不在已切走的页面弹「制作分享图失败」toast；中间副本若有残留由内层 catch 统一清理。
+      // 注意：shareTemplate 的 stablePath 声明于外层 try 块内，不在本 catch 作用域，此处不可引用，故仅 return 静默退出。
+      if (this._destroyed) {
+        return;
+      }
       log.warn('[shareTemplate] failed:', e);
       wx.showToast({ title: '制作分享图失败，请重试', icon: 'none' });
       // 修复 #7 根因：原先仅弹 toast 而不 re-throw，导致 shareTemplate 永远是 resolve，
@@ -757,22 +804,37 @@ Page({
 
   // 分享给朋友
   onShareAppMessage() {
+    // 无效数据守卫（与 onLoad 的 _invalidData 标记联动）：脏数据进入模板页后
+    // 1.5s 返回前用户触发分享时，data.cols/rows 仍为 0——返回兜底标题避免分享「0×0」。
+    if (this._invalidData) {
+      return Object.assign({
+        title: '我用拼豆格子制作拼豆模板',
+        path: '/pages/index/index'
+      }, this._validShareImage());
+    }
     const cols = this.data.cols;
     const rows = this.data.rows;
     return Object.assign({
-      title: '我用拼豆大师制作了一个 ' + cols + '×' + rows + ' 的模板！',
+      title: '我用拼豆格子制作了一个 ' + cols + '×' + rows + ' 的模板！',
       path: '/pages/index/index'
     }, this._validShareImage());
   },
 
   // 分享到朋友圈（注意：朋友圈分享图需要使用永久路径，不支持临时路径）
   onShareTimeline() {
+    // 无效数据守卫（同 onShareAppMessage）：脏数据期间 cols/rows=0，返回兜底标题
+    if (this._invalidData) {
+      return Object.assign({
+        title: '我用拼豆格子制作拼豆模板',
+        query: ''
+      }, this._validShareImage());
+    }
     const cols = this.data.cols;
     const rows = this.data.rows;
     // 朋友圈分享图使用稳定的本地路径（已在 shareTemplate 中持久化）
     // 如果路径为空，微信会使用默认截图
     return Object.assign({
-      title: '我用拼豆大师制作了一个 ' + cols + '×' + rows + ' 的模板！',
+      title: '我用拼豆格子制作了一个 ' + cols + '×' + rows + ' 的模板！',
       query: ''
     }, this._validShareImage());
   }

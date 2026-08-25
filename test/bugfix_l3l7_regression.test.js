@@ -155,11 +155,13 @@ check('B4 index.onFillBackgroundChange 存储抛错时不向 UI 抛异常且更�
 });
 
 // ================= B 专项：colorLibrary.switchPalette =================
-check('B5 colorLibrary.switchPalette 存储抛错时不抛异常且返回色卡', () => {
+// P2-2 修复后：存储失败时内存回退到切换前值、返回 [] 阻止 UI 切换（避免"UI 已切但冷启动回跳"的不一致）。
+// 原测试断言"返回新色卡数组 + 内存已切换"反映的是旧行为，已不符合新语义。
+check('B5 colorLibrary.switchPalette 存储抛错时不抛异常且内存回退', () => {
   const libApp = {
     globalData: {
       selectedPalette: 'artkal_c',
-      colorLibraries: { artkal_c: [{ id: 'c1', hex: '#FFFFFF' }] },
+      colorLibraries: { artkal_c: [{ id: 'c1', hex: '#FFFFFF' }], neko: [{ id: 'n1', hex: '#000000' }] },
       colorLibraryMeta: []
     }
   };
@@ -168,10 +170,10 @@ check('B5 colorLibrary.switchPalette 存储抛错时不抛异常且返回色卡'
   const colorLib = require('../utils/colorLibrary.js');
   let threw = false;
   let colors = null;
-  try { colors = colorLib.switchPalette('artkal_c'); } catch (e) { threw = true; }
+  try { colors = colorLib.switchPalette('neko'); } catch (e) { threw = true; }
   assert.strictEqual(threw, false, 'switchPalette 不应抛出存储异常');
-  assert.ok(Array.isArray(colors) && colors.length === 1, '应返回新色卡颜色数组');
-  assert.strictEqual(libApp.globalData.selectedPalette, 'artkal_c', '内存全局色卡仍应切换');
+  assert.ok(Array.isArray(colors) && colors.length === 0, '存储失败应返回空数组阻止 UI 切换');
+  assert.strictEqual(libApp.globalData.selectedPalette, 'artkal_c', '内存全局色卡应回退到切换前值（与 storage 一致）');
 });
 
 // ================= C 专项 + E id 格式：index.saveToHistory =================

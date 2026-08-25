@@ -5,7 +5,7 @@
 //      存在竞态覆盖；现加 _avatarBusy / _pickerBusy 互斥守卫（与 template.js _saveBusy 同款）。
 //   B. profile.onLoad 此前裸调 wx.getStorageSync('userInfo_safe'/'userInfo')，存储损坏抛错会
 //      中断整页 onLoad 导致白屏；现包裹 try/catch 回退未登录。
-// 采用 scoped require 拦截（同 profile_onchooseavatar_tempfile_cleanup 风格）。
+// 采用 scoped require 拦截（同 profile_onchooseavatar_tempfile_cleanup 风格）。,
 const path = require('path');
 const Module = require('module');
 
@@ -29,7 +29,9 @@ const fakeUtil = {
   },
   getImageInfoWithTimeout: () => Promise.resolve({ width: 100, height: 100, type: 'png' }),
   removeFileIfExists: (p) => { removeCalls.push(p); },
-  CONSTANTS: { DEFAULT_IMAGE_SIZE: 800 }
+  CONSTANTS: { DEFAULT_IMAGE_SIZE: 800 },
+  safeShowLoading: () => {},
+  safeHideLoading: () => {}
 };
 const fakeSecCheck = {
   checkImageByPath: async (p, opts) => {
@@ -50,6 +52,7 @@ Module.prototype.require = function (id) {
 
 global.getApp = () => ({ globalData: {} });
 let chooseMediaSuccessCb = null;
+let chooseMediaCalls = 0;
 global.wx = {
   env: { USER_DATA_PATH: 'wxfile://usr' },
   getFileSystemManager: () => ({
@@ -59,7 +62,7 @@ global.wx = {
   getImageInfo: (opts) => { if (opts.success) opts.success({ width: 100, height: 100 }); },
   showToast: (o) => { toasts.push(o && o.title); },
   getStorageSync: () => null,
-  chooseMedia: (opts) => { chooseMediaSuccessCb = opts.success; },
+  chooseMedia: (opts) => { chooseMediaCalls++; chooseMediaSuccessCb = opts.success; },
   removeStorageSync: () => {},
   setStorageSync: () => {}
 };
@@ -77,6 +80,7 @@ function makeCtx(init) {
 function reset() {
   compressCalls = []; secCheckCalls = []; removeCalls = []; copyCalls = []; toasts = [];
   secCheckShouldPass = true; compressFallback = false; copyShouldFail = false;
+  chooseMediaCalls = 0; chooseMediaSuccessCb = null;
 }
 
 let passed = 0, failed = 0;
@@ -101,14 +105,15 @@ function ok(name, cond) {
 
   // ===== C2: uploadPickerImage 并发守卫 =====
   reset();
-  chooseMediaSuccessCb = null;
   const b = makeCtx();
-  b.uploadPickerImage();                 // 捕获 chooseMedia 的 success 回调
+  b.uploadPickerImage();                 // 第一次触发 chooseMedia
+  ok('C2. 第一次调用触发 chooseMedia（chooseMediaCalls === 1）', chooseMediaCalls === 1);
+  b.uploadPickerImage();                 // 连点第二次，入口 _pickerBusy 守卫直接 return
+  ok('C2. 第二次调用被入口守卫拦截（chooseMedia 未再次触发，chooseMediaCalls 仍为 1）', chooseMediaCalls === 1);
   const s1 = chooseMediaSuccessCb({ tempFiles: [{ tempFilePath: 'wxfile://tmp/pk_A.png' }] });
-  const s2 = chooseMediaSuccessCb({ tempFiles: [{ tempFilePath: 'wxfile://tmp/pk_B.png' }] });
-  await Promise.all([s1, s2]);
-  ok('C2. uploadPickerImage 并发：第二次被 _pickerBusy 守卫忽略，secCheck 仅调用 1 次', secCheckCalls.length === 1);
-  ok('C2. uploadPickerImage 并发：仅首次 A 进入展示读取流程', b.data.pickerImagePath.indexOf('pk_A') !== -1);
+  await s1;
+  ok('C2. 处理完成后 secCheck 仅调用 1 次（无并发重复检测）', secCheckCalls.length === 1);
+  ok('C2. 仅首次 A 进入展示读取流程', b.data.pickerImagePath.indexOf('pk_A') !== -1);
   ok('C2. 守卫正确复位：完成后 _pickerBusy 恢复 false', b._pickerBusy === false);
 
   // ===== B: onLoad 存储读取异常不崩溃 =====
@@ -128,3 +133,4 @@ function ok(name, cond) {
   console.log(`\n${passed} passed, ${failed} failed`);
   process.exit(failed ? 1 : 0);
 })();
+
