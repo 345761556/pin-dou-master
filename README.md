@@ -142,10 +142,12 @@ tabBar 图标已提交版本控制，`git clone` 后即可运行。图标由微�
 
 `cloudfunctions/secCheck` 与 `cloudfunctions/mediaCheckResult` 需在**微信开发者工具**中分别「上传并部署：云端安装依赖」。
 
-`cloudfunctions/secCheck` 与 `cloudfunctions/mediaCheckResult` 需在**微信开发者工具**中分别「上传并部署：云端安装依赖」。
-
 - 云函数使用 `cloud.DYNAMIC_CURRENT_ENV`，无需硬编码环境 ID；
 - 部署后请验证：图片机审流程、限频、降级恢复告警正常。
+
+## 📖 技术复盘（延伸阅读）
+
+- [《拼豆格子技术复盘：内容安全 fail-closed 架构与渲染引擎健壮性设计》](docs/拼豆格子技术复盘_引流.md) —— 一篇写给开发者的实战文，拆解本项目两大难点：① 内容安全机审如何在超时 / 通道不可用时不悬挂、默认拦截（fail-closed）；② 渲染引擎如何在 8000 格上限、33MB 内存预算、主线程分块让出下稳定运行。欢迎 Star / 提 Issue 一起打磨。
 
 ## 开源协作
 
