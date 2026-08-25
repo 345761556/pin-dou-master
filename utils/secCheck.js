@@ -33,6 +33,9 @@ const SEC_CHECK_FN = 'secCheck';
 const MAX_IMAGE_BYTES = 7 * 1024 * 1024;
 
 // 场景白名单（mediaCheckAsync v2 scene：1=资料 2=评论 3=论坛 4=社交日志）
+// ⚠️ 与云函数 cloudfunctions/secCheck/index.js 的 SCENE_WHITELIST 为两份手工同步的定义
+// （云函数独立部署，无法 require 前端模块）。若微信新增场景值，必须两处同改；
+// 漂移后果轻微：云侧对未知值兜底回退 scene 2，不会拒绝送检。
 const SCENE_WHITELIST = [1, 2, 3, 4];
 
 // 图片扩展名白名单（决定云存储路径后缀，与 wx.canvasToTempFilePath 产物一致）
@@ -44,6 +47,7 @@ const BLOCK_TYPE = {
   SIZE: 'size',               // 图片超过检测上限（无法送检）
   RATE: 'rate',               // 限频（云函数 errcode -6）
   UNAVAILABLE: 'unavailable', // 云开发通道不可用
+  LENGTH: 'length',           // 文本超长（无法送检；与「非法/通道异常」区分，避免误导为「暂不可用」）
   ERROR: 'error'              // 调用/内部异常、非 0 errcode、非法路径等
 };
 
@@ -79,7 +83,10 @@ function resolveFail(reason, blockType, suggest = 'unknown') {
     return { pass: false, suggest, skipped: true, reason: 'blocked_' + reason, blockType };
   }
   log.warn('[secCheck] 检测未完成，开发环境降级放行 reason=' + reason);
-  return { pass: true, suggest, skipped: true, reason, blockType };
+  // 降级放行（pass=true）不携带 blockType（外部审查 #7）：blockType 仅在拦截时有意义，
+  // 放行结果若带 VIOLATION/ERROR 等 blockType，未来对 pass 结果误调 blockMessage
+  // 会得到「含违规/暂不可用」的误导文案（与 checkImageByPath 成功路径去 blockType 同口径）。
+  return { pass: true, suggest, skipped: true, reason };
 }
 
 /**
@@ -95,6 +102,7 @@ function blockMessage(result, violationFallback) {
   switch (bt) {
     case BLOCK_TYPE.SIZE: return '图片过大，请压缩后再试';
     case BLOCK_TYPE.RATE: return '操作过于频繁，请稍后再试';
+    case BLOCK_TYPE.LENGTH: return '文本过长，请精简后重试';
     case BLOCK_TYPE.UNAVAILABLE:
     case BLOCK_TYPE.ERROR:
     default: return '内容安全检测暂不可用，请稍后重试';
@@ -124,9 +132,14 @@ function extractExt(filePath) {
 }
 
 /**
- * 读取本地图片字节数（防御：读不到文件按 0 处理，走后续 base64 兜底）
+ * 读取本地图片字节数
+ * 失败返回 -1（而非 0）：0 是「合法文件但字节数恰为 0」的极端值，若读文件失败也返回 0，
+ * 会绕过调用方的 `size > MAX_IMAGE_BYTES` 体积守卫（>7MB 大文件照常走 30s 上传）。
+ * 返回 -1 由调用方 fail-closed 拦截（无法确认体积 = 不放行），与体积守卫同口径。
+ * 注：旧注释声称「走后续 base64 兜底」实际不存在——本项目上传走云存储 fileID 路径，
+ * 无 base64 分支，读文件失败即无法安全送检，应拦截而非静默放行。
  * @param {string} filePath
- * @returns {Promise<number>}
+ * @returns {Promise<number>} 字节数；读取失败返回 -1
  */
 function getFileSize(filePath) {
   return new Promise((resolve) => {
@@ -134,11 +147,11 @@ function getFileSize(filePath) {
       const fs = wx.getFileSystemManager();
       fs.getFileInfo({
         filePath,
-        success: (res) => resolve(res && typeof res.size === 'number' ? res.size : 0),
-        fail: () => resolve(0)
+        success: (res) => resolve(res && typeof res.size === 'number' ? res.size : -1),
+        fail: () => resolve(-1)
       });
     } catch (e) {
-      resolve(0);
+      resolve(-1);
     }
   });
 }
@@ -199,47 +212,102 @@ function callSecCheckFn(fileID, scene) {
 
 /**
  * 轮询查询 mediaCheckAsync 异步检测结果（按 trace_id）
+ *
+ * P1-1 修复：返回值从纯 Promise 改为 { promise, cancel } 结构。
+ *   - 问题：原函数通过 setTimeout 递归调度轮询，页面卸载/用户切走时轮询不会中止，
+ *           最坏持续 25-35s 消耗云函数 callFunction 配额与前端网络资源。
+ *   - 设计：cancelled 标志在 tick 入口、success 回调入口、fail 回调入口三处检查；
+ *           cancel() 通过 clearTimeout 回收待触发的定时器，后续 tick 由 cancelled 标志短路。
+ *   - 悬空语义：若 cancel() 在 Promise 尚未 settle 时调用，Promise 静默悬空（不再 resolve/reject）。
+ *           这是有意为之——调用方已在 finally 中取消 await，悬空 Promise 无副作用、可被 GC，
+ *           且不再触发任何 callFunction（配额/网络不再浪费）。
+ *
  * @param {string} traceId - 提交时返回的 trace_id
- * @param {number} [maxAttempts=20] - 最大轮询次数（每次间隔 1s，共约 20s；官方承诺 30 分钟内推送，
- *                                    实测 5-10s 出结果；缩短至 20s 可在推送异常（如未配置 mediaCheckResult）
- *                                    时更快 fail-closed 拦截，避免用户长时间卡死等待）
+ * @param {number} [maxAttempts=20] - 最大轮询次数；实测 5-10s 出结果；缩短可在推送异常
+ *                                    （如未配置 mediaCheckResult）时更快 fail-closed 拦截，
+ *                                    避免用户长时间卡死等待
  * @param {number} [intervalMs=1000] - 轮询间隔
- * @returns {Promise<{suggest: string}>} resolve 出结果；超时 reject
+ * @param {number} [totalBudgetMs=25000] - 总时间预算（第十三轮审查 R2）：
+ *   maxAttempts 只数次数不看时钟，弱网下单次调用可打满 timeout:10s，
+ *   最坏 20×(10s+1s)≈219s 才 reject，远超「约 20s」设计意图（期间全屏 mask 卡死用户）。
+ *   到达预算后不再发起下一轮（进行中的当次调用无法中止，故实际上限 ≈ 预算 + 单次超时 10s）。
+ * @returns {{promise: Promise<{suggest: string}>, cancel: function}}
+ *   promise resolve 出结果；超时/限频/失败 reject；调用 cancel() 后悬空且不触发新 tick。
  */
-function pollSecCheckResult(traceId, maxAttempts = 20, intervalMs = 1000) {
-  return new Promise((resolve, reject) => {
+function pollSecCheckResult(traceId, maxAttempts = 20, intervalMs = 1000, totalBudgetMs = 25000) {
+  let cancelled = false;
+  let timerId = null;
+
+  const promise = new Promise((resolve, reject) => {
     let attempt = 0;
+    const deadline = Date.now() + totalBudgetMs;
     const tick = () => {
+      // P1-1：tick 入口检查取消标志；cancelled 为 true 时不再发起任何 callFunction，
+      // Promise 静默悬空，由调用方负责不再 await。
+      if (cancelled) return;
       attempt += 1;
-      wx.cloud.callFunction({
-        name: SEC_CHECK_FN,
-        data: { action: 'query', traceId },
-        timeout: 10000,
-        success: (res) => {
-          const result = res && res.result;
-          if (result && result.errcode === 0 && result.status === 'done' && result.suggest) {
-            log.info('[secCheck] 轮询命中 attempt=' + attempt + ' suggest=' + result.suggest);
-            resolve({ suggest: result.suggest });
-            return;
+      try {
+        wx.cloud.callFunction({
+          name: SEC_CHECK_FN,
+          data: { action: 'query', traceId },
+          timeout: 10000,
+          success: (res) => {
+            // P1-1：success 回调入口同样检查——调用期间若被取消，短路、不调度下一次 tick
+            if (cancelled) return;
+            const result = res && res.result;
+            if (result && result.errcode === 0 && result.status === 'done' && result.suggest) {
+              log.info('[secCheck] 轮询命中 attempt=' + attempt + ' suggest=' + result.suggest);
+              resolve({ suggest: result.suggest });
+              return;
+            }
+            // -14（pending 写入失败）：submit 阶段 DB 瞬断导致，重试无意义但不会无限重试——
+            // 被 -14 拒绝的请求会走到 maxAttempts 超时后 fail-closed，
+            // 与 -10（query DB 故障）的隐式 retry 行为一致，无需单独分支。
+            // -6（限频）：见上，提前终止。
+            // 其余非 0 errcode（含 -14）：fall through 到 deadline 检查，超时则 reject。
+            if (result && result.errcode === -6) {
+              log.warn('[secCheck] query 被限频（-6），提前终止轮询 trace_id=' + traceId);
+              reject(new Error('sec_check_query_rate_limited'));
+              return;
+            }
+            if (attempt >= maxAttempts || Date.now() >= deadline) {
+              log.warn('[secCheck] 轮询超时（' + maxAttempts + ' 次 / ' + totalBudgetMs + 'ms 预算）trace_id=' + traceId);
+              reject(new Error('sec_check_poll_timeout'));
+              return;
+            }
+            timerId = setTimeout(tick, intervalMs);
+          },
+          fail: (err) => {
+            // P1-1：fail 回调入口同样检查
+            if (cancelled) return;
+            if (attempt >= maxAttempts || Date.now() >= deadline) {
+              reject(err || new Error('sec_check_poll_failed'));
+              return;
+            }
+            timerId = setTimeout(tick, intervalMs);
           }
-          if (attempt >= maxAttempts) {
-            log.warn('[secCheck] 轮询超时（' + maxAttempts + ' 次）trace_id=' + traceId);
-            reject(new Error('sec_check_poll_timeout'));
-            return;
-          }
-          setTimeout(tick, intervalMs);
-        },
-        fail: (err) => {
-          if (attempt >= maxAttempts) {
-            reject(err || new Error('sec_check_poll_failed'));
-            return;
-          }
-          setTimeout(tick, intervalMs);
-        }
-      });
+        });
+      } catch (e) {
+        // 防御（防「未处理异常」）：tick 在 setTimeout 宏任务里执行，若 callFunction 同步抛错
+        // 或回调外逻辑抛错，无人捕获会成 unhandled rejection。此处收敛为 reject（fail-closed），
+        // 调用方 catch 后走超时拦截，绝不静默吞错。
+        log.error('[secCheck] 轮询 tick 异常:', (e && (e.errMsg || e.message)) || e);
+        reject(e || new Error('sec_check_poll_failed'));
+      }
     };
     tick();
   });
+
+  function cancel() {
+    // P1-1：幂等取消；多次调用安全（不会二次 clearTimeout）。
+    // 不在这里额外 reject promise：若已 settle 无需操作；若尚未 settle，
+    // cancelled 标志会让下一次 tick 短路，Promise 静默悬空可被 GC。
+    if (cancelled) return;
+    cancelled = true;
+    if (timerId != null) { clearTimeout(timerId); timerId = null; }
+  }
+
+  return { promise, cancel };
 }
 
 /**
@@ -253,9 +321,15 @@ function deleteCloudFile(fileID) {
       wx.cloud.deleteFile({
         fileList: [fileID],
         success: () => resolve(),
-        fail: () => resolve()
+        // 观测性补强（交叉审查 #11）：失败仍不阻断主流程，但留痕日志，
+        // 便于排查云存储孤儿文件堆积（此前 fail/catch 双双完全静默）
+        fail: (err) => {
+          log.warn('[secCheck] 云存储兜底删除失败（不阻断，可能残留孤儿文件）:', (err && err.errMsg) || err, fileID);
+          resolve();
+        }
       });
     } catch (e) {
+      log.warn('[secCheck] 云存储兜底删除调用异常（不阻断）:', e, fileID);
       resolve();
     }
   });
@@ -289,14 +363,26 @@ function checkImageByPath(filePath, options = {}) {
     }
 
     // 异步主流程抽离为独立函数，避免 async executor 反模式
+    // P1-1：外层 try-finally 兜底保证 pollHandle.cancel() 在所有退出路径（return / catch / throw）均被调用，
+    // 页面卸载/用户切走/异常中断时不再浪费云函数配额与前端网络资源。
     const run = async () => {
-      let fileID = '';
+      let pollHandle = null;
       try {
+        let fileID = '';
+        try {
         // 1) 体积守卫：超限图片无法送检（mediaCheckAsync 媒体上限 10MB，原始字节取 7MB 余量）。
         //    fail-closed 拦截（而非放行兜底）：>7MB 本就无法送审，放行等于跳过检测；
         //    前端 compressImageIfNeeded(≤800px) 已在前置压缩，正常远小于该值，
         //    触发此分支多为压缩失败回退原图且原图超大，应提示用户压缩后重试。
+        //    size=-1（getFileInfo 读取失败）同样拦截：无法确认体积 = 无法安全送检，
+        //    fail-closed 不放行（否则 >7MB 大文件可绕过体积闸门照常上传）。
         const size = await getFileSize(filePath);
+        // P2-2 修复：size<0 表示文件读取失败（含临时文件被系统回收、权限不足等），
+        // 与 size>MAX_IMAGE_BYTES 的真实超大量是两类根因——前者提示"重新选图"，后者提示"压缩后重试"。
+        // 原实现合并为 image_too_large/BLOCK_TYPE.SIZE，误提示"图片过大请压缩"，用户按提示操作无效。
+        if (size < 0) {
+          return resolveFail('file_unreadable', BLOCK_TYPE.ERROR);
+        }
         if (size > MAX_IMAGE_BYTES) {
           return resolveFail('image_too_large', BLOCK_TYPE.SIZE);
         }
@@ -328,7 +414,10 @@ function checkImageByPath(filePath, options = {}) {
 
         let pollResult;
         try {
-          pollResult = await pollSecCheckResult(traceId);
+          // P1-1：改接收 { promise, cancel } 结构；pollHandle 保存 cancel 句柄，
+          // 外层 finally 保证所有退出路径（含异常/提前 return）均调用 cancel() 中止轮询。
+          pollHandle = pollSecCheckResult(traceId);
+          pollResult = await pollHandle.promise;
         } catch (pollErr) {
           // 5) 轮询超时/失败：检测未在预期窗口完成 → fail-closed 拦截（无法确认安全即拒绝）。
           log.warn('[secCheck] 异步检测结果轮询失败（fail-closed 拦截）:', pollErr);
@@ -347,12 +436,16 @@ function checkImageByPath(filePath, options = {}) {
         // 绝不默认 'pass'（否则防御默认值方向与全模块 fail-closed 教义相悖，见 R1 教训）
         const suggest = (pollResult.suggest || '').toLowerCase();
         log.info('[secCheck] 检测完成 suggest=' + suggest + ' scene=' + scene);
-        // pass 放行；review/risky 一律拦截（对用户仅提示「含违规信息」，不展示细节）
+        // pass 放行；review/risky 一律拦截（对用户仅提示「含违规信息」，不展示细节）。
+        // blockType 仅在拦截（pass=false）时才有意义——blockMessage 按 blockType 给差异化文案，
+        // 成功结果不设 blockType（undefined），避免「pass 结果却携带 VIOLATION」的语义地雷
+        // （若未来有人对成功结果误调 blockMessage 会拿到「含违规信息」的误导文案）。
+        const isPass = suggest === 'pass';
         return {
-          pass: suggest === 'pass',
+          pass: isPass,
           suggest: ['pass', 'review', 'risky'].indexOf(suggest) !== -1 ? suggest : 'unknown',
           skipped: false,
-          blockType: BLOCK_TYPE.VIOLATION
+          blockType: isPass ? undefined : BLOCK_TYPE.VIOLATION
         };
       } catch (err) {
         // 6) 调用异常（网络/云环境未开通/云函数未部署）→ fail-closed 拦截，记告警便于排查
@@ -361,6 +454,11 @@ function checkImageByPath(filePath, options = {}) {
           await deleteCloudFile(fileID); // 兜底清理已上传文件，避免云存储垃圾堆积
         }
         return resolveFail('call_failed', BLOCK_TYPE.ERROR);
+      }
+      } finally {
+        // P1-1：无论 run 如何退出（正常 return / catch 拦截 / throw 抛错 / 外部取消），
+        // 只要轮询曾启动就调用 cancel() 中止递归 setTimeout，杜绝「页面已走、轮询还在打」的泄漏。
+        if (pollHandle && typeof pollHandle.cancel === 'function') pollHandle.cancel();
       }
     };
 
@@ -398,7 +496,10 @@ function callSecCheckText(content) {
   });
 }
 
-// 文本长度上限（与云函数 text 分支一致：昵称保存前已截断到 20 字符，此处留余量到 50）
+// 文本长度上限（与云函数 text 分支一致：昵称保存前已截断到 20 字符，此处留余量到 50）。
+// ⚠️ 按「码点」计数（[...content].length / Array.from）而非 UTF-16 code unit（content.length）：
+// 含 emoji/生僻字的文本一个字符占 2 个 code unit，按 code unit 计数会把「30 个 emoji 昵称」
+// 误判为 60 超长。微信 msgSecCheck 的 50 上限口径同样建议按字符（码点）理解。
 const MAX_TEXT_LENGTH = 50;
 
 /**
@@ -414,9 +515,15 @@ const MAX_TEXT_LENGTH = 50;
  */
 function checkText(content) {
   return new Promise((resolve) => {
-    // 前置守卫：入参合法性 + 云通道可用性（与 checkImageByPath 同款守卫顺序）
-    if (!content || typeof content !== 'string' || content.trim().length === 0 || content.length > MAX_TEXT_LENGTH) {
+    // 前置守卫：入参合法性 + 云通道可用性（与 checkImageByPath 同款守卫顺序）。
+    // 超长与「非法/通道异常」分开标注：超长是用户可修正的输入问题（提示「文本过长」），
+    // 与「检测暂不可用」混用会误导用户反复重试同一内容却永远失败。
+    if (!content || typeof content !== 'string' || content.trim().length === 0) {
       resolve(resolveFail('invalid_text', BLOCK_TYPE.ERROR));
+      return;
+    }
+    if ([...content].length > MAX_TEXT_LENGTH) {
+      resolve(resolveFail('text_too_long', BLOCK_TYPE.LENGTH));
       return;
     }
     if (!isCloudAvailable()) {
@@ -454,6 +561,7 @@ function checkText(content) {
 module.exports = {
   checkImageByPath,
   checkText,
+  pollSecCheckResult,
   isCloudAvailable,
   isFailClosedMode,
   blockMessage,
