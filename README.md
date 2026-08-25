@@ -1,5 +1,13 @@
 # 拼豆格子（PinDou Grids）微信小程序
 
+<p align="center">
+  <img src="docs/screenshots/1-original.png" width="30%" alt="原图">
+  <img src="docs/screenshots/2-template.png" width="30%" alt="拼豆模板渲染图">
+  <img src="docs/screenshots/3-material-list.jpg" width="30%" alt="材料清单">
+</p>
+
+> 上图依次为：**原图 → 拼豆模板渲染 → 材料清单**。完整操作流程演示见 [`docs/screenshots/4-demo.gif`](docs/screenshots/4-demo.gif)。
+
 把图片一键转换成「拼豆 / 像素画」制作模板的小程序：自动生成行列标号、色号对照、材料清单，并支持导出高清制作图。
 
 > 本项目已通过一轮安全与质量审查，欢迎提 Issue / PR 一起找 BUG、改进功能。
