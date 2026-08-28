@@ -4,6 +4,7 @@
     "ignore": [
       { "type": "folder", "value": "_backup_before_ui_redesign" },
       { "type": "folder", "value": ".workbuddy" },
+      { "type": "folder", "value": "docs" },
       { "type": "folder", "value": "test" },
       { "type": "folder", "value": "__pycache__" },
       { "type": "file", "value": "overview.md" },
